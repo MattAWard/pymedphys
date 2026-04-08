@@ -447,7 +447,7 @@ def convert_struct(plan, export_path, skip_pattern):
     ds.SeriesInstanceUID = struct_series_instuid
 
     ds.PatientID = patient_info["MedicalRecordNumber"]
-    ds.ReferringPhysiciansName = patient_info["ReferringPhysician"]
+    ds.ReferringPhysicianName = patient_info["ReferringPhysician"]
     ds.PhysiciansOfRecord = patient_info["RadiationOncologist"]
     ds.StudyDescription = patient_info["Comment"]
     ds.PatientSex = patient_info["Gender"][0]

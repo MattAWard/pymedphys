@@ -33,11 +33,8 @@ def add_array_to_dataset(dataset, key, value):
 
 
 def set_default_transfer_syntax(dataset):
-    if dataset.is_little_endian is None:
-        dataset.is_little_endian = True
-
-    if dataset.is_implicit_VR is None:
-        dataset.is_implicit_VR = True
+    if "TransferSyntaxUID" not in dataset.file_meta:
+        dataset.file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian
 
 
 def dicom_dataset_from_dict(input_dict: dict, template_ds=None):
