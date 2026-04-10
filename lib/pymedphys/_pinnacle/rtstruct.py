@@ -436,14 +436,12 @@ def convert_struct(plan, export_path, skip_pattern):
     ds.Manufacturer = Manufacturer  # TODO: should this be something else?
 
     ds.StationName = "adacp3u7" # TODO: check what this should be
-    ds.ManufacturersModelName = 'Pinnacle3'
+    ds.ManufacturerModelName = 'Pinnacle3'
     ReferencedStudy1 = pydicom.dataset.Dataset()
     ds.ReferencedStudySequence.append(ReferencedStudy1)
     # Study Component Management SOP Class (chosen from template)
     ds.ReferencedStudySequence[0].ReferencedSOPClassUID = "1.2.840.10008.3.1.2.3.2"
-    ds.ReferencedStudySequence[
-        0
-    ].ReferencedSOPInstanceUID = plan.primary_image.image_info[0]["StudyInstanceUID"]
+    ds.ReferencedStudySequence[0].ReferencedSOPInstanceUID = plan.primary_image.image_info[0]["StudyInstanceUID"]
     ds.StudyInstanceUID = plan.primary_image.image_info[0]["StudyInstanceUID"]
     ds.SeriesInstanceUID = struct_series_instuid
 
@@ -539,4 +537,4 @@ def convert_struct(plan, export_path, skip_pattern):
     # Save the RTDose Dicom File
     output_file = os.path.join(export_path, struct_filename)
     plan.logger.info("Creating Struct file: %s", output_file)
-    ds.save_as(output_file, write_like_original=False)
+    ds.save_as(output_file, enforce_file_format=True)

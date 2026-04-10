@@ -291,7 +291,7 @@ def test_dicom_listener_send_conflicting_file(listener, test_dataset):
     )
     ds = pydicom.dcmread(file_path)
     ds.Manufacturer = "PyMedPhysModified"
-    ds.save_as(file_path, write_like_original=False)
+    ds.save_as(file_path, enforce_file_format=True)
 
     # Send again, should save the file in the orphan directory
     ae = pynetdicom.AE()
@@ -376,7 +376,7 @@ def test_dicom_sender_cli(test_dataset):
         send_directory = test_directory.joinpath("send")
         send_directory.mkdir()
         send_file = send_directory.joinpath("test.dcm")
-        test_dataset.save_as(send_file, write_like_original=False)
+        test_dataset.save_as(send_file, enforce_file_format=True)
 
         receive_directory = test_directory.joinpath("receive")
         receive_directory.mkdir()

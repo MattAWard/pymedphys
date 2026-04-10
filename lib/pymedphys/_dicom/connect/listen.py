@@ -171,13 +171,15 @@ class DicomListener(DicomConnectBase):
             filepath, {}, file_meta=meta, preamble=b"\0" * 128
         )
         file_ds.update(dataset)
+
+        #TODO: update this to new combined transfer syntax
         file_ds.is_little_endian = context.transfer_syntax.is_little_endian
         file_ds.is_implicit_VR = context.transfer_syntax.is_implicit_VR
 
         try:
-            # We use `write_like_original=False` to ensure that a compliant
+            # We use `enforce_file_format=True` to ensure that a compliant
             # File Meta Information Header is written
-            file_ds.save_as(filepath, write_like_original=False)
+            file_ds.save_as(filepath, enforce_file_format=True)
             status_ds.Status = 0x0000  # Success
 
             logging.info("DICOM object received: %s", filepath)

@@ -246,7 +246,6 @@ def convert_dose(plan, export_path):
             planInstanceUID,
             dose_origin,
             patient_position,
-            plan_info,
             ds,
             export_path
         )
