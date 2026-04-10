@@ -55,7 +55,7 @@ from .constants import (
 )
 
 
-# Determine which point to use for the iso center and set this value in
+# Determine which point to use for the isocenter and set this value in
 # the plan object
 def find_iso_center(plan):
     iso_center = []
@@ -109,7 +109,7 @@ def find_iso_center(plan):
             iso_center = temp_point2
         else:
             if len(plan.points) > 0:
-                # setting to first point if isocenter or ct center not found
+                # TODO: check validity of setting to first point if isocenter/ ct center is not found
                 iso_center = plan.points[0]["refpoint"]
 
     plan.iso_center = iso_center
@@ -165,7 +165,7 @@ def read_points(ds, plan):
         structure_set_roi.ROIName = point["Name"]
         plan.logger.info("Exporting point: %s", point["Name"])
 
-        # Not sure what this is for, just basing off template, should look into further
+        # TODO: figure out what these are
         structure_set_roi.ROIGenerationAlgorithm = "SEMIAUTOMATIC"
         structure_set_roi.ReferencedFrameOfReferenceUID = plan.primary_image.image_info[
             0

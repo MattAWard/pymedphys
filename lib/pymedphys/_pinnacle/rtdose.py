@@ -160,8 +160,7 @@ def convert_dose(plan, export_path):
 
     ds.SOPClassUID = RTDoseSOPClassUID  # RT Dose Storage
     ds.SOPInstanceUID = doseInstanceUID
-    datetimesplit = plan_info["ObjectVersion"]["WriteTimeStamp"].split()
-    # Read more accurate date from trial file if it is available
+    datetimesplit = plan_info["ObjectVersion"]["WriteTimeStamp"].split() # TODO: read more accurate date from trial file if it is available
     trial_info = plan.trial_info
     if trial_info:
         datetimesplit = trial_info["ObjectVersion"]["WriteTimeStamp"].split()
@@ -188,7 +187,7 @@ def convert_dose(plan, export_path):
     ds.FrameOfReferenceUID = image_info["FrameUID"]
     ds.StudyID = plan.primary_image.image["StudyID"]
 
-    # Assume zero struct shift for now (may not the case for versions below Pinnacle 9)
+    # TODO: Include non-zero struct shifts (for versions below Pinnacle 9)
     if patient_position in ("HFP", "FFS"):
         dose_origin_x = -trial_info["DoseGrid .Origin .X"] * 10
     elif patient_position in ("HFS", "FFP"):
@@ -204,8 +203,7 @@ def convert_dose(plan, export_path):
     elif patient_position in ("FFS", "FFP"):
         dose_origin_z = trial_info["DoseGrid .Origin .Z"] * 10
 
-    # Image Position (Patient) seems off, so going to calculate shift assuming
-    # dose origin in center and I want outer edge
+    # TODO: Verify Image Position (Patient) rather than calculating shift assuming dose origin in center and wanting outer edge.
     ydoseshift = (
         trial_info["DoseGrid .VoxelSize .Y"] * 10 * trial_info["DoseGrid .Dimension .Y"]
         - trial_info["DoseGrid .VoxelSize .Y"] * 10
@@ -240,19 +238,19 @@ def convert_dose(plan, export_path):
             dose_origin_z + zdoseshift,
         ]
 
-    # Read this from CT DCM if available?
+    # TODO: Read this from CT DCM if available
     ds.ImageOrientationPatient = IMAGE_ORIENTATION_MAP[patient_position]
 
-    # Read this from CT DCM if available
+    # TODO: Read this from CT DCM if available
     ds.PositionReferenceIndicator = ""
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = "MONOCHROME2"
 
     ds.NumberOfFrames = int(
         trial_info["DoseGrid .Dimension .Z"]
-    )  # is this Z dimension???
-    # Using y for Rows because that's what's in the exported dicom file for
-    # test patient
+    )  # TODO: Confirm this is z dimension
+
+    # TODO: Confirm y for rows and x for columns (as that is what is in the exported dicom file)
     ds.Rows = int(trial_info["DoseGrid .Dimension .Y"])
     ds.Columns = int(trial_info["DoseGrid .Dimension .X"])
     ds.PixelSpacing = [
@@ -267,8 +265,7 @@ def convert_dose(plan, export_path):
     ds.DoseType = "PHYSICAL"
     ds.DoseSummationType = "PLAN"
 
-    # Since DoseSummationType is PLAN, only need to reference RTPLAN here, no need to
-    # reference fraction group.
+    # TODO: confirm that, since DoseSummationType is PLAN, we only need to reference RTPLAN here, not the ref fraction group
     ds.ReferencedRTPlanSequence = pydicom.sequence.Sequence()
     ds.ReferencedRTPlanSequence.append(pydicom.dataset.Dataset())
     ds.ReferencedRTPlanSequence[0].ReferencedSOPClassUID = RTPlanSOPClassUID
