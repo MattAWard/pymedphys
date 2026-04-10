@@ -45,6 +45,7 @@ import time
 
 from pymedphys._imports import pydicom
 from pymedphys._pinnacle.pinnacle_exceptions import MissingCTImageError
+from pymedphys._dicom.create import set_default_transfer_syntax
 
 from .constants import (
     GImplementationClassUID,
@@ -166,7 +167,7 @@ def read_points(ds, plan):
         structure_set_roi.ROIName = point["Name"]
         plan.logger.info("Exporting point: %s", point["Name"])
 
-        # TODO: figure out what these are
+        # TODO: determine what these quantities are
         structure_set_roi.ROIGenerationAlgorithm = "SEMIAUTOMATIC"
         structure_set_roi.ReferencedFrameOfReferenceUID = plan.primary_image.image_info[
             0
@@ -181,14 +182,15 @@ def read_points(ds, plan):
         rt_roi_observations.ROIInterpreter = ""
         ds.RTROIObservationsSequence.append(rt_roi_observations)
 
-    # Not applying any shifts of points at the moment. Needed for Pinnacle pre v9.0
-    # for enteredpoints in ds.ROIContourSequence:
-    #     #logger.debug("In loop applying shifts: isocenter:" + str(data["isocenter"]) )
-    #     enteredpoints.ContourSequence[0].ContourData[0] = str(float(enteredpoints.ContourSequence[0].ContourData[0]) - data["xshift"])
-    #     enteredpoints.ContourSequence[0].ContourData[1] = str(float(enteredpoints.ContourSequence[0].ContourData[1]) - data["yshift"])
-    #     #enteredpoints.ContourSequence[0].ContourData[2] = str(float(enteredpoints.ContourSequence[0].ContourData[2]) - float(data["isocenter"][2]))
-    #     #logger.debug("bottom of loop applying shifts isocenter:" + str(data["isocenter"]))
-
+    # TODO: include isocenter shifts for Pinnacle version < 9.0
+    """
+    for enteredpoints in ds.ROIContourSequence:
+        logger.debug("In loop applying shifts: isocenter:" + str(data["isocenter"]) )
+        enteredpoints.ContourSequence[0].ContourData[0] = str(float(enteredpoints.ContourSequence[0].ContourData[0]) - data["xshift"])
+        enteredpoints.ContourSequence[0].ContourData[1] = str(float(enteredpoints.ContourSequence[0].ContourData[1]) - data["yshift"])
+        enteredpoints.ContourSequence[0].ContourData[2] = str(float(enteredpoints.ContourSequence[0].ContourData[2]) - float(data["isocenter"][2]))
+        logger.debug("bottom of loop applying shifts isocenter:" + str(data["isocenter"]))
+    """
     return ds
 
 
@@ -211,7 +213,7 @@ def read_roi(ds, plan, skip_pattern):
     with open(path_roi) as f:
         for _, line in enumerate(f, 1):
             if flag_skip_roi:
-                # read til we hit end of ROI
+                # read until we hit end of ROI
                 if "}; // End of ROI" in line:
                     flag_skip_roi = False
 
@@ -424,19 +426,17 @@ def convert_struct(plan, export_path, skip_pattern):
     struct_series_instuid = pydicom.uid.generate_uid()
     ds.ReferencedStudySequence = pydicom.sequence.Sequence()
 
-    # not sure what I want here, going off of template dicom file
-    ds.SpecificCharacterSet = "ISO_IR 100"
+    ds.SpecificCharacterSet = "ISO_IR 100" # TODO: confirm this against the DICOM template file
     ds.InstanceCreationDate = time.strftime("%Y%m%d")
     ds.InstanceCreationTime = time.strftime("%H%M%S")
     ds.SOPClassUID = RTStructSOPClassUID
     ds.SOPInstanceUID = struct_sop_instuid
     ds.Modality = RTSTRUCTModality
     ds.AccessionNumber = ""
-    ds.Manufacturer = Manufacturer  # from sample dicom file, maybe should change?
-    # not sure where to get information for this element can find this and
-    # read in from
-    ds.StationName = "adacp3u7"
-    # ds.ManufacturersModelName = 'Pinnacle3'
+    ds.Manufacturer = Manufacturer  # TODO: should this be something else?
+
+    ds.StationName = "adacp3u7" # TODO: check what this should be
+    ds.ManufacturersModelName = 'Pinnacle3'
     ReferencedStudy1 = pydicom.dataset.Dataset()
     ds.ReferencedStudySequence.append(ReferencedStudy1)
     # Study Component Management SOP Class (chosen from template)
@@ -456,8 +456,7 @@ def convert_struct(plan, export_path, skip_pattern):
     ds.StructureSetLabel = plan.plan_info["PlanName"]
     ds.StudyID = plan.primary_image.image["StudyID"]
 
-    datetimesplit = plan.plan_info["ObjectVersion"]["WriteTimeStamp"].split()
-    # Read more accurate date from trial file if it is available
+    datetimesplit = plan.plan_info["ObjectVersion"]["WriteTimeStamp"].split() # TODO: read more accurate date from trial file if it is available
     trial_info = plan.trial_info
     if trial_info:
         datetimesplit = trial_info["ObjectVersion"]["WriteTimeStamp"].split()
@@ -531,14 +530,11 @@ def convert_struct(plan, export_path, skip_pattern):
     ds = read_points(ds, plan)
     ds = read_roi(ds, plan, skip_pattern)
 
-    # find out where to get if its been approved or not
-    # find out how to insert proper 'CodeString' here
+    # TODO: find way to include actual approval status from trial file
     ds.ApprovalStatus = "UNAPPROVED"
-    # Set the transfer syntax
 
-    # TODO: Use `pymedphys._dicom.create.set_default_transfer_syntax` here
-    ds.is_little_endian = True
-    ds.is_implicit_VR = True
+    # Set the transfer syntax
+    set_default_transfer_syntax(ds)
 
     # Save the RTDose Dicom File
     output_file = os.path.join(export_path, struct_filename)

@@ -168,7 +168,7 @@ def convert_dose(plan, export_path):
     ds.StudyTime = datetimesplit[1].replace(":", "")
     ds.AccessionNumber = ""
     ds.Modality = RTDOSEModality
-    ds.Manufacturer = Manufacturer
+    ds.Manufacturer = Manufacturer # TODO: should this be something else?
     ds.OperatorsName = ""
     ds.ManufacturerModelName = plan_info.get("ToolType", "")
     ds.SoftwareVersions = [plan_info["PinnacleVersionDescription"]]
