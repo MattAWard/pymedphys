@@ -176,7 +176,7 @@ class PinnaclePlan:
 
             # trial info is always a dict (we can ignore this)
             if not self._trial_info:
-                self._trial_info = self._trials[0]  # TODO: include multiple trials rather than just the first
+                self._trial_info = self._trials[0]
 
             self.logger.debug("Number of trials read: %s", len(self._trials))
             self.logger.debug("Active Trial: %s", self._trial_info["Name"])

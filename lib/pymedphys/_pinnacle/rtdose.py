@@ -116,7 +116,18 @@ def trilinear_interpolation(idx, grid):
 
 
 def convert_dose(plan, export_path):
-    # Check that the plan has a primary image, as we can't create a meaningful RTDOSE without it:
+    """Export RTDose files for all trials in the plan.
+
+    For each trial, generates unique UIDs and creates an RTDOSE DICOM file.
+
+    Parameters
+    ----------
+    plan : PinnaclePlan
+        The plan object containing trials and plan information.
+    export_path : str
+        Directory where DICOM files will be saved.
+    """
+    # Check that the plan has a primary image
     if not plan.primary_image:
         plan.logger.error("No primary image found for plan. Unable to generate RTDOSE.")
         raise MissingCTImageError("Plan has no primary image associated with it.")
@@ -125,9 +136,7 @@ def convert_dose(plan, export_path):
 
     patient_info = plan.pinnacle.patient_info
     plan_info = plan.plan_info
-    trial_info = plan.trial_info    # this selects the dict for trials[0]
     image_info = plan.primary_image.image_info[0]
-
     patient_position = plan.patient_position
 
     if patient_position not in supported_orientations:
@@ -136,9 +145,122 @@ def convert_dose(plan, export_path):
             f"{supported_orientations}"
         )
 
-    # Get the UID for the Dose and the Plan
-    doseInstanceUID = plan.dose_inst_uid
-    planInstanceUID = plan.plan_inst_uid
+    # Calculate dose origin shifts (plan-level, same for all trials)
+    if patient_position in ("HFP", "FFS"):
+        dose_origin_x_sign = -1
+    elif patient_position in ("HFS", "FFP"):
+        dose_origin_x_sign = 1
+
+    if patient_position in ("HFS", "FFS"):
+        dose_origin_y_sign = -1
+    elif patient_position in ("HFP", "FFP"):
+        dose_origin_y_sign = 1
+
+    if patient_position in ("HFS", "HFP"):
+        dose_origin_z_sign = -1
+    elif patient_position in ("FFS", "FFP"):
+        dose_origin_z_sign = 1
+
+    # Process each trial
+    for trial_info in plan.trials:
+        # Set this trial as active to generate unique UIDs for this trial
+        plan.active_trial = trial_info["Name"]
+        plan.logger.info("Exporting Dose for trial: %s", trial_info["Name"])
+
+        # Get the UIDs for the Dose and the Plan (unique per trial)
+        doseInstanceUID = plan.dose_inst_uid
+        planInstanceUID = plan.plan_inst_uid
+
+        # Calculate dose origin for this trial
+        dose_origin_x = dose_origin_x_sign * trial_info["DoseGrid .Origin .X"] * 10
+        dose_origin_y = dose_origin_y_sign * trial_info["DoseGrid .Origin .Y"] * 10
+        dose_origin_z = dose_origin_z_sign * trial_info["DoseGrid .Origin .Z"] * 10
+
+        # Call the trial-specific dose conversion function
+        convert_dose_for_trial(
+            plan,
+            trial_info,
+            doseInstanceUID,
+            planInstanceUID,
+            dose_origin_x,
+            dose_origin_y,
+            dose_origin_z,
+            patient_position,
+            patient_info,
+            plan_info,
+            image_info,
+            export_path
+        )
+
+
+def convert_dose_for_trial(plan, trial_info, doseInstanceUID, planInstanceUID,
+                           dose_origin_x, dose_origin_y, dose_origin_z,
+                           patient_position, patient_info, plan_info, image_info, export_path):
+    """Convert dose for a specific trial.
+
+    Parameters
+    ----------
+    plan : PinnaclePlan
+        The plan object.
+    trial_info : dict
+        The trial dictionary containing dose and beam information.
+    doseInstanceUID : str
+        The DICOM UID for this dose instance.
+    planInstanceUID : str
+        The DICOM UID for the plan instance.
+    dose_origin_x : float
+        The X origin of the dose grid (mm).
+    dose_origin_y : float
+        The Y origin of the dose grid (mm).
+    dose_origin_z : float
+        The Z origin of the dose grid (mm).
+    patient_position : str
+        The patient position code (e.g., "HFS").
+    patient_info : dict
+        Patient demographic information.
+    plan_info : dict
+        Plan information.
+    image_info : dict
+        Image header information.
+    export_path : str
+        Directory where the DICOM file will be saved.
+    """
+
+    # Calculate trial-specific dose grid shifts
+    ydoseshift = (
+        trial_info["DoseGrid .VoxelSize .Y"] * 10 * trial_info["DoseGrid .Dimension .Y"]
+        - trial_info["DoseGrid .VoxelSize .Y"] * 10
+    )
+    zdoseshift = (
+        trial_info["DoseGrid .VoxelSize .Z"] * 10 * trial_info["DoseGrid .Dimension .Z"]
+        - trial_info["DoseGrid .VoxelSize .Z"] * 10
+    )
+
+    # Calculate ImagePositionPatient based on patient position and trial-specific shifts
+    if patient_position == "HFS":
+        image_position_patient = [
+            dose_origin_x,
+            dose_origin_y - ydoseshift,
+            dose_origin_z - zdoseshift,
+        ]
+    elif patient_position == "HFP":
+        image_position_patient = [
+            dose_origin_x,
+            dose_origin_y + ydoseshift,
+            dose_origin_z - zdoseshift,
+        ]
+    elif patient_position == "FFS":
+        image_position_patient = [
+            dose_origin_x,
+            dose_origin_y - ydoseshift,
+            dose_origin_z + zdoseshift,
+        ]
+    elif patient_position == "FFP":
+        image_position_patient = [
+            dose_origin_x,
+            dose_origin_y + ydoseshift,
+            dose_origin_z + zdoseshift,
+        ]
 
     # Populate required values for file meta information
     file_meta = pydicom.dataset.Dataset()
@@ -147,9 +269,9 @@ def convert_dose(plan, export_path):
     file_meta.MediaStorageSOPInstanceUID = doseInstanceUID
     file_meta.ImplementationClassUID = GImplementationClassUID
 
-    # Create the pydicom.dataset.FileDataset instance (initially no data elements, but
-    # file_meta supplied)
-    RDfilename = f"RD.{file_meta.MediaStorageSOPInstanceUID}.dcm"
+    # Create the pydicom.dataset.FileDataset instance
+    trial_name = trial_info.get("Name", "Unknown")
+    RDfilename = f"RD.{trial_name}.{file_meta.MediaStorageSOPInstanceUID}.dcm"
     ds = pydicom.dataset.FileDataset(
         RDfilename, {}, file_meta=file_meta, preamble=b"\x00" * 128
     )
@@ -159,16 +281,17 @@ def convert_dose(plan, export_path):
 
     ds.SOPClassUID = RTDoseSOPClassUID  # RT Dose Storage
     ds.SOPInstanceUID = doseInstanceUID
-    datetimesplit = plan_info["ObjectVersion"]["WriteTimeStamp"].split() # TODO: read more accurate date from trial file if it is available
-    trial_info = plan.trial_info
-    if trial_info:
+
+    # Get study date/time from trial if available, otherwise from plan
+    datetimesplit = plan_info["ObjectVersion"]["WriteTimeStamp"].split()
+    if "ObjectVersion" in trial_info:
         datetimesplit = trial_info["ObjectVersion"]["WriteTimeStamp"].split()
 
     ds.StudyDate = datetimesplit[0].replace("-", "")
     ds.StudyTime = datetimesplit[1].replace(":", "")
     ds.AccessionNumber = ""
     ds.Modality = RTDOSEModality
-    ds.Manufacturer = Manufacturer # TODO: should this be something else?
+    ds.Manufacturer = Manufacturer
     ds.OperatorsName = ""
     ds.ManufacturerModelName = plan_info.get("ToolType", "")
     ds.SoftwareVersions = [plan_info["PinnacleVersionDescription"]]
@@ -186,70 +309,13 @@ def convert_dose(plan, export_path):
     ds.FrameOfReferenceUID = image_info["FrameUID"]
     ds.StudyID = plan.primary_image.image["StudyID"]
 
-    # TODO: Include non-zero struct shifts (for versions below Pinnacle 9)
-    if patient_position in ("HFP", "FFS"):
-        dose_origin_x = -trial_info["DoseGrid .Origin .X"] * 10
-    elif patient_position in ("HFS", "FFP"):
-        dose_origin_x = trial_info["DoseGrid .Origin .X"] * 10
-
-    if patient_position in ("HFS", "FFS"):
-        dose_origin_y = -trial_info["DoseGrid .Origin .Y"] * 10
-    elif patient_position in ("HFP", "FFP"):
-        dose_origin_y = trial_info["DoseGrid .Origin .Y"] * 10
-
-    if patient_position in ("HFS", "HFP"):
-        dose_origin_z = -trial_info["DoseGrid .Origin .Z"] * 10
-    elif patient_position in ("FFS", "FFP"):
-        dose_origin_z = trial_info["DoseGrid .Origin .Z"] * 10
-
-    # TODO: Verify Image Position (Patient) rather than calculating shift assuming dose origin in center and wanting outer edge.
-    ydoseshift = (
-        trial_info["DoseGrid .VoxelSize .Y"] * 10 * trial_info["DoseGrid .Dimension .Y"]
-        - trial_info["DoseGrid .VoxelSize .Y"] * 10
-    )
-    zdoseshift = (
-        trial_info["DoseGrid .VoxelSize .Z"] * 10 * trial_info["DoseGrid .Dimension .Z"]
-        - trial_info["DoseGrid .VoxelSize .Z"] * 10
-    )
-
-    if patient_position == "HFS":
-        ds.ImagePositionPatient = [
-            dose_origin_x,
-            dose_origin_y - ydoseshift,
-            dose_origin_z - zdoseshift,
-        ]
-    elif patient_position == "HFP":
-        ds.ImagePositionPatient = [
-            dose_origin_x,
-            dose_origin_y + ydoseshift,
-            dose_origin_z - zdoseshift,
-        ]
-    elif patient_position == "FFS":
-        ds.ImagePositionPatient = [
-            dose_origin_x,
-            dose_origin_y - ydoseshift,
-            dose_origin_z + zdoseshift,
-        ]
-    elif patient_position == "FFP":
-        ds.ImagePositionPatient = [
-            dose_origin_x,
-            dose_origin_y + ydoseshift,
-            dose_origin_z + zdoseshift,
-        ]
-
-    # TODO: Read this from CT DCM if available
+    ds.ImagePositionPatient = image_position_patient
     ds.ImageOrientationPatient = IMAGE_ORIENTATION_MAP[patient_position]
-
-    # TODO: Read this from CT DCM if available
     ds.PositionReferenceIndicator = ""
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = "MONOCHROME2"
 
-    ds.NumberOfFrames = int(
-        trial_info["DoseGrid .Dimension .Z"]
-    )  # TODO: Confirm this is z dimension
-
-    # TODO: Confirm y for rows and x for columns (as that is what is in the exported dicom file)
+    ds.NumberOfFrames = int(trial_info["DoseGrid .Dimension .Z"])
     ds.Rows = int(trial_info["DoseGrid .Dimension .Y"])
     ds.Columns = int(trial_info["DoseGrid .Dimension .X"])
     ds.PixelSpacing = [
@@ -264,7 +330,6 @@ def convert_dose(plan, export_path):
     ds.DoseType = "PHYSICAL"
     ds.DoseSummationType = "PLAN"
 
-    # TODO: confirm that, since DoseSummationType is PLAN, we only need to reference RTPLAN here, not the ref fraction group
     ds.ReferencedRTPlanSequence = pydicom.sequence.Sequence()
     ds.ReferencedRTPlanSequence.append(pydicom.dataset.Dataset())
     ds.ReferencedRTPlanSequence[0].ReferencedSOPClassUID = RTPlanSOPClassUID
@@ -275,19 +340,18 @@ def convert_dose(plan, export_path):
     grid_frame_offset_vector = []
     for p in range(0, int(trial_info["DoseGrid .Dimension .Z"])):
         grid_frame_offset_vector.append(
-            p * float(trial_info["DoseGrid .VoxelSize .X"] * 10)
+            p * float(trial_info["DoseGrid .VoxelSize .Z"] * 10)
         )
     ds.GridFrameOffsetVector = grid_frame_offset_vector
 
     # Array in which to sum the dose values of all beams
     summed_pixel_values = []
 
-    # For each beam in the trial, convert the dose from the Pinnacle binary
-    # file and sum together
+    # For each beam in the trial, convert the dose from the Pinnacle binary file and sum
     beam_list = trial_info["BeamList"] if trial_info["BeamList"] else []
     if len(beam_list) == 0:
-        plan.logger.warning("No Beams found in Trial. Unable to generate RTDOSE.")
-        raise MissingTrialBeamsError("No Beams found in Trial.")
+        plan.logger.warning("No Beams found in Trial: %s. Unable to generate RTDOSE.", trial_name)
+        raise MissingTrialBeamsError(f"No Beams found in Trial: {trial_name}")
 
     empty_beam_count = 0
     for beam in beam_list:
