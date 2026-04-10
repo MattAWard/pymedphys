@@ -179,7 +179,6 @@ class PinnaclePlan:
                 self._trial_info = self._trials[0]
 
             self.logger.debug("Number of trials read: %s", len(self._trials))
-            self.logger.debug("Active Trial: %s", self._trial_info["Name"])
 
         return self._trials
 
@@ -193,16 +192,17 @@ class PinnaclePlan:
 
         return self._trial_info
 
-    @active_trial.setter
-    def active_trial(self, trial_name):
-        if isinstance(trial_name, str):
-            for trial in self.trials:
-                if trial["Name"] == trial_name:
-                    self._trial_info = trial
-                    self.logger.info("Active Trial set: %s", trial_name)
-                    return
 
-        raise KeyError
+    #@active_trial.setter
+    #def active_trial(self, trial_name):
+    #    if isinstance(trial_name, str):
+    #        for trial in self.trials:
+    #            if trial["Name"] == trial_name:
+    #                self._trial_info = trial
+    #                self.logger.info("Active Trial set: %s", trial_name)
+    #                return
+
+    #    raise KeyError
 
     @property
     def plan_info(self):
