@@ -46,8 +46,7 @@ import time
 
 from pymedphys._imports import numpy as np
 from pymedphys._imports import pydicom
-from .exception_classes import MissingBeamDoseError, MissingCTImageError, MissingTrialBeamsError
-
+from pymedphys._pinnacle.pinnacle_exceptions import MissingBeamDoseError, MissingCTImageError, MissingTrialBeamsError
 
 from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
 
@@ -292,6 +291,7 @@ def convert_dose(plan, export_path):
 
     empty_beam_count = 0
     for beam in beam_list:
+
         plan.logger.info("Exporting Dose for beam: %s", beam["Name"])
 
         # Get the binary file for this beam
@@ -365,7 +365,6 @@ def convert_dose(plan, export_path):
             ds.ImagePositionPatient[1],
             ds.ImagePositionPatient[2],
         ]
-
         dose_grid = construct_dose_from_binary(binary_data, dose_grid)
 
         # Get the index within that grid of the dose reference point
