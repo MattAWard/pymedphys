@@ -172,11 +172,11 @@ class PinnaclePlan:
             self.logger.debug("Reading trial data from: %s", path_trial)
             self._trials = pinn_to_dict(path_trial)
             if isinstance(self._trials, dict):
-                self._trials = [self._trials["Trial"]]
+                self._trials = [self._trials["Trial"]]  # make sure trials is always a list of dicts
 
-            # Select the first trial by default
+            # trial info is always a dict (we can ignore this)
             if not self._trial_info:
-                self._trial_info = self._trials[0]
+                self._trial_info = self._trials[0]  # TODO: include multiple trials rather than just the first
 
             self.logger.debug("Number of trials read: %s", len(self._trials))
             self.logger.debug("Active Trial: %s", self._trial_info["Name"])
@@ -226,9 +226,8 @@ class PinnaclePlan:
         """
 
         if not self._trial_info:
-            # Ensures that the trials are read and a default
-            # trial_info is set
-            self.trials  # pylint: disable=pointless-statement
+            # Ensures that the trials are read and a default trial_info is set
+            _ = self.trials
 
         return self._trial_info
 

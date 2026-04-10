@@ -125,7 +125,7 @@ def convert_dose(plan, export_path):
 
     patient_info = plan.pinnacle.patient_info
     plan_info = plan.plan_info
-    trial_info = plan.trial_info
+    trial_info = plan.trial_info    # this selects the dict for trials[0]
     image_info = plan.primary_image.image_info[0]
 
     patient_position = plan.patient_position
