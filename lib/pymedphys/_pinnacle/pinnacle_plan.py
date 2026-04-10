@@ -347,10 +347,7 @@ class PinnaclePlan:
         self._plan_inst_uid = pydicom.uid.generate_uid(
             prefix=RTPLAN_prefix, entropy_srcs=entropy_srcs
         )
-        RTDOSE_prefix = f"{self._uid_prefix}2."
-        self._dose_inst_uid = pydicom.uid.generate_uid(
-            prefix=RTDOSE_prefix, entropy_srcs=entropy_srcs
-        )
+
         RTSTRUCT_prefix = f"{self._uid_prefix}3."
         self._struct_inst_uid = pydicom.uid.generate_uid(
             prefix=RTSTRUCT_prefix, entropy_srcs=entropy_srcs
@@ -374,21 +371,6 @@ class PinnaclePlan:
             self.generate_uids()
 
         return self._plan_inst_uid
-
-    @property
-    def dose_inst_uid(self):
-        """Gets the instance UID for RTDOSE.
-
-        Returns
-        -------
-        uid : str
-            The UID to use for the dose.
-        """
-
-        if not self._dose_inst_uid:
-            self.generate_uids()
-
-        return self._dose_inst_uid
 
     @property
     def struct_inst_uid(self):

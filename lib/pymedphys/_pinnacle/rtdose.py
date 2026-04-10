@@ -161,20 +161,82 @@ def convert_dose(plan, export_path):
     elif patient_position in ("FFS", "FFP"):
         dose_origin_z_sign = 1
 
+    # Create base DICOM dataset with plan-level metadata (used for all trials)
+    file_meta = pydicom.dataset.Dataset()
+    file_meta.MediaStorageSOPClassUID = RTDoseSOPClassUID
+    file_meta.TransferSyntaxUID = GTransferSyntaxUID
+    file_meta.ImplementationClassUID = GImplementationClassUID
+
+    ds = pydicom.dataset.FileDataset(
+        "RD.dcm", {}, file_meta=file_meta, preamble=b"\x00" * 128
+    )
+    ds.SpecificCharacterSet = "ISO_IR 100"
+    ds.InstanceCreationDate = time.strftime("%Y%m%d")
+    ds.InstanceCreationTime = time.strftime("%H%M%S")
+
+    ds.SOPClassUID = RTDoseSOPClassUID  # RT Dose Storage
+
+    ds.AccessionNumber = ""
+    ds.Modality = RTDOSEModality
+    ds.Manufacturer = Manufacturer
+    ds.OperatorsName = ""
+    ds.ManufacturerModelName = plan_info.get("ToolType", "")
+    ds.SoftwareVersions = [plan_info["PinnacleVersionDescription"]]
+    ds.PhysiciansOfRecord = patient_info["RadiationOncologist"]
+    ds.PatientName = patient_info["FullName"]
+    ds.PatientBirthDate = patient_info["DOB"]
+    ds.PatientID = patient_info["MedicalRecordNumber"]
+    ds.PatientSex = patient_info["Gender"][0]
+
+    ds.StudyInstanceUID = image_info["StudyInstanceUID"]
+    ds.FrameOfReferenceUID = image_info["FrameUID"]
+    ds.StudyID = plan.primary_image.image["StudyID"]
+
+    ds.ImageOrientationPatient = IMAGE_ORIENTATION_MAP[patient_position]
+    ds.PositionReferenceIndicator = ""
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+
+    ds.BitsAllocated = 16
+    ds.BitsStored = 16
+    ds.HighBit = 15
+    ds.PixelRepresentation = 0
+    ds.DoseUnits = "GY"
+    ds.DoseType = "PHYSICAL"
+    ds.DoseSummationType = "PLAN"
+
+    ds.ReferencedRTPlanSequence = pydicom.sequence.Sequence()
+    ds.ReferencedRTPlanSequence.append(pydicom.dataset.Dataset())
+    ds.ReferencedRTPlanSequence[0].ReferencedSOPClassUID = RTPlanSOPClassUID
+
+    ds.TissueHeterogeneityCorrection = "IMAGE"
+
+    # Use the same plan UID for all trials, and generate a fresh dose UID each time.
+    planInstanceUID = plan.plan_inst_uid
+    ds.ReferencedRTPlanSequence[0].ReferencedSOPInstanceUID = planInstanceUID
+
     # Process each trial
     for trial_info in plan.trials:
-        # Set this trial as active to generate unique UIDs for this trial
         plan.active_trial = trial_info["Name"]
         plan.logger.info("Exporting Dose for trial: %s", trial_info["Name"])
 
-        # Get the UIDs for the Dose and the Plan (unique per trial)
-        doseInstanceUID = plan.dose_inst_uid
-        planInstanceUID = plan.plan_inst_uid
+        # Separate dose UID for each trial
+        doseInstanceUID = pydicom.uid.generate_uid(
+            prefix=f"{plan._uid_prefix}2.",
+            entropy_srcs=[
+                plan.pinnacle.patient_info["MedicalRecordNumber"],
+                plan_info["PlanName"],
+                trial_info["Name"],
+                trial_info["ObjectVersion"]["WriteTimeStamp"],
+            ],
+        )
 
         # Calculate dose origin for this trial
-        dose_origin_x = dose_origin_x_sign * trial_info["DoseGrid .Origin .X"] * 10
-        dose_origin_y = dose_origin_y_sign * trial_info["DoseGrid .Origin .Y"] * 10
-        dose_origin_z = dose_origin_z_sign * trial_info["DoseGrid .Origin .Z"] * 10
+        dose_origin = [
+            dose_origin_x_sign * trial_info["DoseGrid .Origin .X"] * 10,
+            dose_origin_y_sign * trial_info["DoseGrid .Origin .Y"] * 10,
+            dose_origin_z_sign * trial_info["DoseGrid .Origin .Z"] * 10,
+        ]
 
         # Call the trial-specific dose conversion function
         convert_dose_for_trial(
@@ -182,20 +244,16 @@ def convert_dose(plan, export_path):
             trial_info,
             doseInstanceUID,
             planInstanceUID,
-            dose_origin_x,
-            dose_origin_y,
-            dose_origin_z,
+            dose_origin,
             patient_position,
-            patient_info,
             plan_info,
-            image_info,
+            ds,
             export_path
         )
 
 
 def convert_dose_for_trial(plan, trial_info, doseInstanceUID, planInstanceUID,
-                           dose_origin_x, dose_origin_y, dose_origin_z,
-                           patient_position, patient_info, plan_info, image_info, export_path):
+                           dose_origin, patient_position, ds, export_path):
     """Convert dose for a specific trial.
 
     Parameters
@@ -208,23 +266,16 @@ def convert_dose_for_trial(plan, trial_info, doseInstanceUID, planInstanceUID,
         The DICOM UID for this dose instance.
     planInstanceUID : str
         The DICOM UID for the plan instance.
-    dose_origin_x : float
-        The X origin of the dose grid (mm).
-    dose_origin_y : float
-        The Y origin of the dose grid (mm).
-    dose_origin_z : float
-        The Z origin of the dose grid (mm).
+    dose_origin : list
+        The dose origin [x, y, z] in mm.
     patient_position : str
         The patient position code (e.g., "HFS").
-    patient_info : dict
-        Patient demographic information.
-    plan_info : dict
-        Plan information.
-    image_info : dict
-        Image header information.
     export_path : str
         Directory where the DICOM file will be saved.
     """
+
+    # Unpack dose origin
+    dose_origin_x, dose_origin_y, dose_origin_z = dose_origin
 
     # Calculate trial-specific dose grid shifts
     ydoseshift = (
@@ -262,59 +313,19 @@ def convert_dose_for_trial(plan, trial_info, doseInstanceUID, planInstanceUID,
             dose_origin_z + zdoseshift,
         ]
 
-    # Populate required values for file meta information
-    file_meta = pydicom.dataset.Dataset()
-    file_meta.MediaStorageSOPClassUID = RTDoseSOPClassUID
-    file_meta.TransferSyntaxUID = GTransferSyntaxUID
-    file_meta.MediaStorageSOPInstanceUID = doseInstanceUID
-    file_meta.ImplementationClassUID = GImplementationClassUID
-
-    # Create the pydicom.dataset.FileDataset instance
+    # Update trial-specific DICOM fields
     trial_name = trial_info.get("Name", "Unknown")
-    RDfilename = f"RD.{trial_name}.{file_meta.MediaStorageSOPInstanceUID}.dcm"
-    ds = pydicom.dataset.FileDataset(
-        RDfilename, {}, file_meta=file_meta, preamble=b"\x00" * 128
-    )
-    ds.SpecificCharacterSet = "ISO_IR 100"
-    ds.InstanceCreationDate = time.strftime("%Y%m%d")
-    ds.InstanceCreationTime = time.strftime("%H%M%S")
 
-    ds.SOPClassUID = RTDoseSOPClassUID  # RT Dose Storage
+    # Update the SOP Instance UID for this trial
     ds.SOPInstanceUID = doseInstanceUID
+    ds.file_meta.MediaStorageSOPInstanceUID = doseInstanceUID
 
-    # Get study date/time from trial if available, otherwise from plan
-    datetimesplit = plan_info["ObjectVersion"]["WriteTimeStamp"].split()
-    if "ObjectVersion" in trial_info:
-        datetimesplit = trial_info["ObjectVersion"]["WriteTimeStamp"].split()
+    # Update filename with trial name and UID
+    RDfilename = f"RD.{trial_name}.{doseInstanceUID}.dcm"
+    ds.filename = RDfilename
 
-    ds.StudyDate = datetimesplit[0].replace("-", "")
-    ds.StudyTime = datetimesplit[1].replace(":", "")
-    ds.AccessionNumber = ""
-    ds.Modality = RTDOSEModality
-    ds.Manufacturer = Manufacturer
-    ds.OperatorsName = ""
-    ds.ManufacturerModelName = plan_info.get("ToolType", "")
-    ds.SoftwareVersions = [plan_info["PinnacleVersionDescription"]]
-    ds.PhysiciansOfRecord = patient_info["RadiationOncologist"]
-    ds.PatientName = patient_info["FullName"]
-    ds.PatientBirthDate = patient_info["DOB"]
-    ds.PatientID = patient_info["MedicalRecordNumber"]
-    ds.PatientSex = patient_info["Gender"][0]
-
-    ds.SliceThickness = trial_info["DoseGrid .VoxelSize .Z"] * 10
-    ds.SeriesInstanceUID = doseInstanceUID
-    ds.InstanceNumber = "1"
-
-    ds.StudyInstanceUID = image_info["StudyInstanceUID"]
-    ds.FrameOfReferenceUID = image_info["FrameUID"]
-    ds.StudyID = plan.primary_image.image["StudyID"]
-
+    # Update trial-specific image position and grid parameters
     ds.ImagePositionPatient = image_position_patient
-    ds.ImageOrientationPatient = IMAGE_ORIENTATION_MAP[patient_position]
-    ds.PositionReferenceIndicator = ""
-    ds.SamplesPerPixel = 1
-    ds.PhotometricInterpretation = "MONOCHROME2"
-
     ds.NumberOfFrames = int(trial_info["DoseGrid .Dimension .Z"])
     ds.Rows = int(trial_info["DoseGrid .Dimension .Y"])
     ds.Columns = int(trial_info["DoseGrid .Dimension .X"])
@@ -322,21 +333,13 @@ def convert_dose_for_trial(plan, trial_info, doseInstanceUID, planInstanceUID,
         trial_info["DoseGrid .VoxelSize .X"] * 10,
         trial_info["DoseGrid .VoxelSize .Y"] * 10,
     ]
-    ds.BitsAllocated = 16
-    ds.BitsStored = 16
-    ds.HighBit = 15
-    ds.PixelRepresentation = 0
-    ds.DoseUnits = "GY"
-    ds.DoseType = "PHYSICAL"
-    ds.DoseSummationType = "PLAN"
+    ds.SliceThickness = trial_info["DoseGrid .VoxelSize .Z"] * 10
 
-    ds.ReferencedRTPlanSequence = pydicom.sequence.Sequence()
-    ds.ReferencedRTPlanSequence.append(pydicom.dataset.Dataset())
-    ds.ReferencedRTPlanSequence[0].ReferencedSOPClassUID = RTPlanSOPClassUID
+    # Update trial-specific reference IDs
+    ds.SeriesInstanceUID = doseInstanceUID
     ds.ReferencedRTPlanSequence[0].ReferencedSOPInstanceUID = planInstanceUID
 
-    ds.TissueHeterogeneityCorrection = "IMAGE"
-
+    # Update grid frame offset vector for this trial
     grid_frame_offset_vector = []
     for p in range(0, int(trial_info["DoseGrid .Dimension .Z"])):
         grid_frame_offset_vector.append(
