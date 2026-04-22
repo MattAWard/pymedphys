@@ -1,6 +1,9 @@
 {
   "devDependencies": {
-    "cypress": "^9.1.1",
-    "cypress-file-upload": "^5.0.6"
+    "cypress": "15.14.1"
+  },
+  "scripts": {
+    "cypress:open": "cypress open",
+    "cypress:run": "cypress run"
   }
 }
