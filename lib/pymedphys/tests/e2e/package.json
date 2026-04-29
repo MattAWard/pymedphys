@@ -2,6 +2,9 @@
   "devDependencies": {
     "cypress": "15.14.1"
   },
+  "resolutions": {
+    "uuid": ">=14.0.0"
+  },
   "scripts": {
     "cypress:open": "cypress open",
     "cypress:run": "cypress run"

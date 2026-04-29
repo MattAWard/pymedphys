@@ -163,12 +163,16 @@ docs = [
   "networkx",
   "numba",
   "numpy",
+  "Pillow>=12.1.1",          # ADD — prevents old Pillow resolving via matplotlib
   "pydicom>=3.0.2",
   "scipy",
   "sphinx-argparse",
   "sphinx-book-theme",
   "toml",
+  "tornado>=6.5.5",          # ADD — prevents old tornado via ipykernel/jupyter
   "tqdm",
+  "urllib3>=2.6.0",           # ADD — prevents old urllib3 via requests/sphinx
+  "wheel>=0.45.2",            # ADD — path traversal fix
 ]
 
 doctests = [
