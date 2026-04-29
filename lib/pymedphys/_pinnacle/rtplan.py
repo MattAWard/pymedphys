@@ -43,6 +43,7 @@ import re
 import time
 
 from pymedphys._imports import pydicom
+from pymedphys._pinnacle.pinnacle_exceptions import MissingCTImageError, MissingTrialBeamsError
 
 from .constants import (
     GImplementationClassUID,
@@ -58,7 +59,7 @@ def convert_plan(plan, export_path):
     # Check that the plan has a primary image, as we can't create a meaningful RTPLAN without it:
     if not plan.primary_image:
         plan.logger.error("No primary image found for plan. Unable to generate RTPLAN.")
-        return
+        raise MissingCTImageError("Plan has no primary image associated with it.")
 
     # TODO Fix the RTPLAN export functionality and remove this warning
     plan.logger.warning(
@@ -97,9 +98,8 @@ def convert_plan(plan, export_path):
     ds.SOPClassUID = RTPlanSOPClassUID  # RT Plan Storage
     ds.SOPInstanceUID = planInstanceUID
 
-    datetimesplit = plan_info["ObjectVersion"]["WriteTimeStamp"].split()
+    datetimesplit = plan_info["ObjectVersion"]["WriteTimeStamp"].split() # TODO: read more accurate date from trial file if it is available
 
-    # Read more accurate date from trial file if it is available
     trial_info = plan.trial_info
     if trial_info:
         datetimesplit = trial_info["ObjectVersion"]["WriteTimeStamp"].split()
@@ -131,13 +131,11 @@ def convert_plan(plan, export_path):
     ds.RTPlanDate = ds.StudyDate
     ds.RTPlanTime = ds.StudyTime
 
-    # ds.PlanIntent = "" #Not sure where to get this informationd, will likely
-    # be 'CURATIVE' or 'PALLIATIVE'
+    ds.PlanIntent = "" # TODO: palliative/ curative - find where to get this information from
     ds.RTPlanGeometry = "PATIENT"
-    # Figure out what goes in DoseReferenceSequence... Should be like a target volume and
-    # reference point I think...
+    # TODO: find what goes in DoseReferenceSequence - should be  a target volume and reference point I think...
     # ds.DoseReferenceSequence = pydicom.sequence.Sequence()
-    # figure out where to get this information
+    # TODO: find what goes in ToleranceTableSequence
     # ds.ToleranceTableSequence = pydicom.sequence.Sequence()
     ds.FractionGroupSequence = pydicom.sequence.Sequence()
     ds.BeamSequence = pydicom.sequence.Sequence()
@@ -147,7 +145,7 @@ def convert_plan(plan, export_path):
     ds.ReferencedStructureSetSequence.append(ReferencedStructureSet1)
     ds.ReferencedStructureSetSequence[0].ReferencedSOPClassUID = RTStructSOPClassUID
     ds.ReferencedStructureSetSequence[0].ReferencedSOPInstanceUID = plan.struct_inst_uid
-    ds.ApprovalStatus = "UNAPPROVED"  # find out where to get this information
+    ds.ApprovalStatus = "UNAPPROVED"  # TODO: find way to include actual approval status from trial file
 
     ds.FractionGroupSequence.append(pydicom.dataset.Dataset())
     ds.FractionGroupSequence[0].ReferencedBeamSequence = pydicom.sequence.Sequence()
@@ -159,7 +157,8 @@ def convert_plan(plan, export_path):
     beam_list = trial_info["BeamList"] if trial_info["BeamList"] else []
     if len(beam_list) == 0:
         plan.logger.warning("No Beams found in Trial. Unable to generate RTPLAN.")
-        return
+        raise MissingTrialBeamsError("No Beams found in Trial.")
+
     for beam in beam_list:
         beam_count = beam_count + 1
 
@@ -176,8 +175,8 @@ def convert_plan(plan, export_path):
             beam_count - 1
         ].ReferencedBeamNumber = beam_count
         ds.BeamSequence.append(pydicom.dataset.Dataset())
-        # figure out what to put here
-        ds.BeamSequence[beam_count - 1].Manufacturer = Manufacturer
+
+        ds.BeamSequence[beam_count - 1].Manufacturer = Manufacturer # TODO: should this be something else?
         ds.BeamSequence[beam_count - 1].BeamNumber = beam_count
         ds.BeamSequence[beam_count - 1].TreatmentDeliveryType = "TREATMENT"
         ds.BeamSequence[beam_count - 1].ReferencedPatientSetupNumber = beam_count
@@ -304,7 +303,7 @@ def convert_plan(plan, export_path):
                         f"{cp['WedgeContext']['WedgeName'].upper()}{wedgeangle}IN"
                     )
                     wedgeorientation = (
-                        "0"  # temporary until I find out what to put here
+                        "0"  # TODO: temporary until we find what to enter here
                     )
                 elif wedgeinorout == "WedgeTopToBottom":
                     wedgename = (
@@ -316,7 +315,7 @@ def convert_plan(plan, export_path):
                 plan.logger.debug("Wedge present")
                 wedgetype = "STANDARD"
                 # wedgeflag = True
-                numwedges = 1
+                numwedges = 1 # TODO: can we assume only one wedge per beam?
                 wedgeangle = cp["WedgeContext"]["Angle"]
                 wedgeinorout = ""
                 wedgeinorout = cp["WedgeContext"]["Orientation"]
@@ -331,7 +330,7 @@ def convert_plan(plan, export_path):
                 if wedgeinorout == "WedgeRightToLeft":
                     wedgename = f"W{int(wedgeangle)}R{numberinname}"
                     wedgeorientation = (
-                        "90"  # temporary until I find out what to put here
+                        "90"  # TODO: temporary until we find what to enter here
                     )
                 elif wedgeinorout == "WedgeLeftToRight":
                     wedgename = f"W{int(wedgeangle)}L{numberinname}"
@@ -339,12 +338,12 @@ def convert_plan(plan, export_path):
                 elif wedgeinorout == "WedgeTopToBottom":
                     wedgename = f"W{int(wedgeangle)}OUT{numberinname}"
                     wedgeorientation = (
-                        "180"  # temporary until I find out what to put here
+                        "180"  # TODO: temporary until we find what to enter here
                     )
                 elif wedgeinorout == "WedgeBottomToTop":
                     wedgename = f"W{int(wedgeangle)}IN{numberinname}"
                     wedgeorientation = (
-                        "0"  # temporary until I find out what to put here
+                        "0"  # TODO: temporary until we find what to enter here
                     )
                 plan.logger.debug("Wedge name = %s", wedgename)
 
@@ -396,9 +395,8 @@ def convert_plan(plan, export_path):
         gantryrotdir = "NONE"
         if (
             "GantryIsCCW" in cp_manager
-        ):  # This may be a problem here!!!! Not sure how to Pinnacle does this, could
-            # be 1 if CW, must be somewhere that states if gantry is rotating or not
-            if cp_manager["GantryIsCCW"] == 1:
+        ):
+            if cp_manager["GantryIsCCW"] == 1: # TODO: check this against whether gantry is rotating or not
                 gantryrotdir = "CC"
         if "GantryIsCW" in cp_manager:
             if cp_manager["GantryIsCW"] == 1:
@@ -429,10 +427,10 @@ def convert_plan(plan, export_path):
                 ].WedgeSequence = pydicom.sequence.Sequence()
                 ds.BeamSequence[beam_count - 1].WedgeSequence.append(
                     pydicom.dataset.Dataset()
-                )  # I am assuming only one wedge per beam (which makes sense because you can't change it during beam)
+                )
                 ds.BeamSequence[beam_count - 1].WedgeSequence[
                     0
-                ].WedgeNumber = 1  # might need to change this
+                ].WedgeNumber = 1  # TODO: can we assume only one wedge per beam?
                 ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeType = wedgetype
                 ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeAngle = wedgeangle
                 ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeID = wedgename
@@ -593,13 +591,13 @@ def convert_plan(plan, export_path):
                 ds.BeamSequence[
                     beam_count - 1
                 ].NumberOfWedges = (
-                    numwedges  # this is temporary value, will read in from file later
+                    numwedges  # TODO: can we assume only one wedge per beam?
                 )
                 ds.BeamSequence[
                     beam_count - 1
-                ].NumberOfCompensators = "0"  # Also temporary
-                ds.BeamSequence[beam_count - 1].NumberOfBoli = "0"
-                ds.BeamSequence[beam_count - 1].NumberOfBlocks = "0"  # Temp
+                ].NumberOfCompensators = "0"  # TODO: temporary until we find where to get this information from
+                ds.BeamSequence[beam_count - 1].NumberOfBoli = "0" #TODO: temporary until we find where to get this information from
+                ds.BeamSequence[beam_count - 1].NumberOfBlocks = "0"  # TODO: temporary until we find where to get this information from
                 ds.BeamSequence[
                     beam_count - 1
                 ].BeamLimitingDeviceSequence = pydicom.sequence.Sequence()
@@ -707,10 +705,9 @@ def convert_plan(plan, export_path):
                 ds.BeamSequence[beam_count - 1].WedgeSequence.append(
                     pydicom.dataset.Dataset()
                 )
-                # I am assuming only one wedge per beam (which makes sense
-                # because you can't change it during beam)
-                ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeNumber = 1
-                # might need to change this
+
+                ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeNumber = 1 # TODO: can we assume only one wedge per beam?
+
                 ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeType = wedgetype
                 ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeAngle = wedgeangle
                 ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeID = wedgename
@@ -845,10 +842,10 @@ def convert_plan(plan, export_path):
                     ds.BeamSequence[
                         beam_count - 1
                     ].NumberOfCompensators = (
-                        "0"  # this is temporary value, will read in from file later
+                        "0"  # TODO: temporary until we find where to get this information from
                     )
-                    ds.BeamSequence[beam_count - 1].NumberOfBoli = "0"  # Also temporary
-                    ds.BeamSequence[beam_count - 1].NumberOfBlocks = "0"  # Temp
+                    ds.BeamSequence[beam_count - 1].NumberOfBoli = "0"  # TODO: temporary until we find where to get this information from
+                    ds.BeamSequence[beam_count - 1].NumberOfBlocks = "0"  # TODO: temporary until we find where to get this information from
                 else:
                     # This will be the mlcs for control points other than the first
                     ds.BeamSequence[beam_count - 1].ControlPointSequence[
@@ -991,4 +988,4 @@ def convert_plan(plan, export_path):
     # Save the RTPlan Dicom File
     output_file = os.path.join(export_path, RPfilename)
     plan.logger.info("Creating Plan file: %s", output_file)
-    ds.save_as(output_file, write_like_original=False)
+    ds.save_as(output_file, enforce_file_format=True)

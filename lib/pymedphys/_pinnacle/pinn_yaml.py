@@ -43,6 +43,7 @@ import re
 from pymedphys._imports import yaml
 
 
+# if multiple trials, result = list of dicts,  otherwise single dict
 def pinn_to_dict(filename):
     result = None
     with open(filename, encoding="ISO-8859-1", errors="ignore") as fp:
