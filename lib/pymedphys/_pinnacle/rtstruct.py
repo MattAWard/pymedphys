@@ -426,7 +426,9 @@ def convert_struct(plan, export_path, skip_pattern):
     struct_series_instuid = pydicom.uid.generate_uid()
     ds.ReferencedStudySequence = pydicom.sequence.Sequence()
 
-    ds.SpecificCharacterSet = "ISO_IR 100" # TODO: confirm this against the DICOM template file
+    ds.SpecificCharacterSet = (
+        "ISO_IR 100"  # TODO: confirm this against the DICOM template file
+    )
     ds.InstanceCreationDate = time.strftime("%Y%m%d")
     ds.InstanceCreationTime = time.strftime("%H%M%S")
     ds.SOPClassUID = RTStructSOPClassUID
@@ -435,13 +437,15 @@ def convert_struct(plan, export_path, skip_pattern):
     ds.AccessionNumber = ""
     ds.Manufacturer = Manufacturer  # TODO: should this be something else?
 
-    ds.StationName = "adacp3u7" # TODO: check what this should be
-    ds.ManufacturerModelName = 'Pinnacle3'
+    ds.StationName = "adacp3u7"  # TODO: check what this should be
+    ds.ManufacturerModelName = "Pinnacle3"
     ReferencedStudy1 = pydicom.dataset.Dataset()
     ds.ReferencedStudySequence.append(ReferencedStudy1)
     # Study Component Management SOP Class (chosen from template)
     ds.ReferencedStudySequence[0].ReferencedSOPClassUID = "1.2.840.10008.3.1.2.3.2"
-    ds.ReferencedStudySequence[0].ReferencedSOPInstanceUID = plan.primary_image.image_info[0]["StudyInstanceUID"]
+    ds.ReferencedStudySequence[
+        0
+    ].ReferencedSOPInstanceUID = plan.primary_image.image_info[0]["StudyInstanceUID"]
     ds.StudyInstanceUID = plan.primary_image.image_info[0]["StudyInstanceUID"]
     ds.SeriesInstanceUID = struct_series_instuid
 
@@ -454,7 +458,9 @@ def convert_struct(plan, export_path, skip_pattern):
     ds.StructureSetLabel = plan.plan_info["PlanName"]
     ds.StudyID = plan.primary_image.image["StudyID"]
 
-    datetimesplit = plan.plan_info["ObjectVersion"]["WriteTimeStamp"].split() # TODO: read more accurate date from trial file if it is available
+    datetimesplit = plan.plan_info["ObjectVersion"][
+        "WriteTimeStamp"
+    ].split()  # TODO: read more accurate date from trial file if it is available
     trial_info = plan.trial_info
     if trial_info:
         datetimesplit = trial_info["ObjectVersion"]["WriteTimeStamp"].split()

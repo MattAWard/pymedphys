@@ -172,7 +172,7 @@ class DicomListener(DicomConnectBase):
         )
         file_ds.update(dataset)
 
-        #TODO: update this to new combined transfer syntax
+        # TODO: update this to new combined transfer syntax
         file_ds.is_little_endian = context.transfer_syntax.is_little_endian
         file_ds.is_implicit_VR = context.transfer_syntax.is_implicit_VR
 
