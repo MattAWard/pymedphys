@@ -221,7 +221,7 @@ python-dateutil==2.9.0.post0
     #   matplotlib
 pywin32==311 ; platform_python_implementation != 'PyPy' and sys_platform == 'win32'
     # via jupyter-core
-pyyaml==6.0.2
+pyyaml==6.0.3
     # via
     #   jupyter-book
     #   jupyter-cache
