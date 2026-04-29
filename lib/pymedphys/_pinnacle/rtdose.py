@@ -46,7 +46,11 @@ import time
 
 from pymedphys._imports import numpy as np
 from pymedphys._imports import pydicom
-from pymedphys._pinnacle.pinnacle_exceptions import MissingBeamDoseError, MissingCTImageError, MissingTrialBeamsError
+from pymedphys._pinnacle.pinnacle_exceptions import (
+    MissingBeamDoseError,
+    MissingCTImageError,
+    MissingTrialBeamsError,
+)
 
 from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
 
@@ -59,16 +63,17 @@ from .constants import (
     RTPlanSOPClassUID,
 )
 
+
 def construct_dose_from_binary(binary_data, array):
     """
     Read binary data into empty dose array
     """
     X, Y, Z = array.shape
-    idx=0
+    idx = 0
     for z in range(Z - 1, -1, -1):
         for y in range(Y):
             for x in range(X):
-                data_element = binary_data[idx:idx+4]
+                data_element = binary_data[idx : idx + 4]
                 value = struct.unpack(">f", data_element)[0]
                 array[x, y, z] = value
                 idx += 4
@@ -247,12 +252,20 @@ def convert_dose(plan, export_path):
             dose_origin,
             patient_position,
             ds,
-            export_path
+            export_path,
         )
 
 
-def convert_dose_for_trial(plan, trial_info, doseInstanceUID, planInstanceUID,
-                           dose_origin, patient_position, ds, export_path):
+def convert_dose_for_trial(
+    plan,
+    trial_info,
+    doseInstanceUID,
+    planInstanceUID,
+    dose_origin,
+    patient_position,
+    ds,
+    export_path,
+):
     """Convert dose for a specific trial.
 
     Parameters
@@ -352,12 +365,13 @@ def convert_dose_for_trial(plan, trial_info, doseInstanceUID, planInstanceUID,
     # For each beam in the trial, convert the dose from the Pinnacle binary file and sum
     beam_list = trial_info["BeamList"] if trial_info["BeamList"] else []
     if len(beam_list) == 0:
-        plan.logger.warning("No Beams found in Trial: %s. Unable to generate RTDOSE.", trial_name)
+        plan.logger.warning(
+            "No Beams found in Trial: %s. Unable to generate RTDOSE.", trial_name
+        )
         raise MissingTrialBeamsError(f"No Beams found in Trial: {trial_name}")
 
     empty_beam_count = 0
     for beam in beam_list:
-
         plan.logger.info("Exporting Dose for beam: %s", beam["Name"])
 
         # Get the binary file for this beam
@@ -368,10 +382,14 @@ def convert_dose_for_trial(plan, trial_info, doseInstanceUID, planInstanceUID,
         # check whether the binary file is non-empty
         binary_data = read_binary_data(binary_file)
         if binary_data is False:
-            plan.logger.warning("No Dose found for beam: %s. Skipping beam.", beam['Name'])
+            plan.logger.warning(
+                "No Dose found for beam: %s. Skipping beam.", beam["Name"]
+            )
             empty_beam_count += 1
             if empty_beam_count == len(beam_list):
-                plan.logger.error("All beams in plan are missing dose. Unable to generate RTDOSE.")
+                plan.logger.error(
+                    "All beams in plan are missing dose. Unable to generate RTDOSE."
+                )
                 raise MissingBeamDoseError("All beams in plan are missing dose.")
             continue
 
