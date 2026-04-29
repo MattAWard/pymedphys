@@ -53,7 +53,7 @@ def index(application_options):
     with open(TITLE_LOGO) as f:
         svg_logo_text = f.read()
 
-    st.components.v1.html(
+    st.iframe(
         f"""
             <div style="text-align:center;">
                 {svg_logo_text}
