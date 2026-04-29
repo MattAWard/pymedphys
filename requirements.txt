@@ -146,7 +146,7 @@ markupsafe==3.0.3
     #   flask
     #   jinja2
     #   werkzeug
-matplotlib==3.10.8
+matplotlib==3.10.9
     # via
     #   dicompyler-core
     #   pymedphys
