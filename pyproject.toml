@@ -158,7 +158,7 @@ tests = [
 
 docs = [
   "ipython>=7.31.1",
-  "jupyter-book>=0.12.0,<2.0.0",
+  "jupyter-book>=0.12.0,<3.0.0",
   "matplotlib",
   "networkx",
   "numba",
@@ -224,7 +224,7 @@ all = [
     "doc8",
     "imageio[tifffile]",
     "ipython>=7.31.1",
-    "jupyter-book>=0.12.0,<2.0.0",
+    "jupyter-book>=0.12.0,<3.0.0",
     "keyring",
     "matplotlib",
     "natsort",
