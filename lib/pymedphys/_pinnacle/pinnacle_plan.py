@@ -172,7 +172,9 @@ class PinnaclePlan:
             self.logger.debug("Reading trial data from: %s", path_trial)
             self._trials = pinn_to_dict(path_trial)
             if isinstance(self._trials, dict):
-                self._trials = [self._trials["Trial"]]  # make sure trials is always a list of dicts
+                self._trials = [
+                    self._trials["Trial"]
+                ]  # make sure trials is always a list of dicts
 
             # trial info is always a dict (we can ignore this)
             if not self._trial_info:
