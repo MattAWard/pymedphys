@@ -130,7 +130,7 @@ linkify-it-py==2.1.0
     # via jupyter-book
 llvmlite==0.47.0
     # via numba
-markdown-it-py==3.0.0
+markdown-it-py==4.0.0
     # via
     #   mdit-py-plugins
     #   myst-parser
