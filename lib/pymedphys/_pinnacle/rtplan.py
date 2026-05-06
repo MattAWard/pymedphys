@@ -56,10 +56,26 @@ from .constants import (
     RTPlanSOPClassUID,
     RTStructSOPClassUID,
 )
+from .pinnacle_metadata import append_pinnacle_metadata_for_plan
+
+
+def _sanitize_for_filename(name):
+    """Make a trial name safe for use in a DICOM file name."""
+    # Replace anything that isn't a word char, dash or dot with an underscore
+    return re.sub(r"[^\w\-.]", "_", str(name)) if name else "trial"
 
 
 def convert_plan(plan, export_path):
-    # Check that the plan has a primary image, as we can't create a meaningful RTPLAN without it:
+    """Export RTPLAN files for every trial in the plan.
+
+    For each trial: switch the plan's active trial, generate fresh per-trial
+    UIDs, and call ``convert_plan_for_trial`` to write a single RTPLAN file.
+    The matching RTSTRUCT UID for that trial is also generated here so the
+    written RTPLAN's ``ReferencedStructureSetSequence`` lines up with the
+    RTSTRUCT that ``convert_struct`` will emit for the same trial.
+    """
+    # Check that the plan has a primary image, as we can't create a
+    # meaningful RTPLAN without it:
     if not plan.primary_image:
         plan.logger.error("No primary image found for plan. Unable to generate RTPLAN.")
         raise MissingCTImageError("Plan has no primary image associated with it.")
@@ -69,16 +85,44 @@ def convert_plan(plan, export_path):
         "RTPLAN export functionality is currently not validated and not stable. Use with caution."
     )
 
+    for trial_info in plan.trials:
+        plan.active_trial = trial_info["Name"]
+        plan.logger.info("Exporting RTPLAN for trial: %s", trial_info["Name"])
+
+        uids = plan.generate_uids_for_trial(trial_info)
+        try:
+            convert_plan_for_trial(
+                plan,
+                trial_info,
+                plan_instance_uid=uids["plan"],
+                struct_instance_uid=uids["struct"],
+                export_path=export_path,
+            )
+        except MissingTrialBeamsError as exc:
+            # One trial having no beams shouldn't stop the others.
+            plan.logger.warning(
+                "Skipping RTPLAN for trial '%s': %s", trial_info["Name"], exc
+            )
+            continue
+
+
+def convert_plan_for_trial(
+    plan,
+    trial_info,
+    plan_instance_uid,
+    struct_instance_uid,
+    export_path,
+):
+    """Write a single RTPLAN DICOM file for one specific trial."""
+
     patient_info = plan.pinnacle.patient_info
     plan_info = plan.plan_info
-    trial_info = plan.trial_info
     image_info = plan.primary_image.image_info[0]
     machine_info = plan.machine_info
 
     patient_position = plan.patient_position
 
-    # Get the UID for the Plan
-    planInstanceUID = plan.plan_inst_uid
+    planInstanceUID = plan_instance_uid
 
     # Populate required values for file meta information
     file_meta = pydicom.dataset.Dataset()
@@ -87,9 +131,11 @@ def convert_plan(plan, export_path):
     file_meta.MediaStorageSOPInstanceUID = planInstanceUID
     file_meta.ImplementationClassUID = GImplementationClassUID
 
-    # Create the pydicom.dataset.FileDataset instance (initially no data elements, but
-    # file_meta supplied)
-    RPfilename = f"RP.{file_meta.MediaStorageSOPInstanceUID}.dcm"
+    # Create the pydicom.dataset.FileDataset instance (initially no data
+    # elements, but file_meta supplied). Filename includes the trial name so
+    # multiple trials don't collide on disk.
+    safe_trial = _sanitize_for_filename(trial_info.get("Name"))
+    RPfilename = f"RP.{safe_trial}.{planInstanceUID}.dcm"
     ds = pydicom.dataset.FileDataset(
         RPfilename, {}, file_meta=file_meta, preamble=b"\x00" * 128
     )
@@ -101,11 +147,8 @@ def convert_plan(plan, export_path):
     ds.SOPClassUID = RTPlanSOPClassUID  # RT Plan Storage
     ds.SOPInstanceUID = planInstanceUID
 
-    datetimesplit = plan_info["ObjectVersion"][
-        "WriteTimeStamp"
-    ].split()  # TODO: read more accurate date from trial file if it is available
-
-    trial_info = plan.trial_info
+    # Read more accurate date from trial file if it is available
+    datetimesplit = plan_info["ObjectVersion"]["WriteTimeStamp"].split()
     if trial_info:
         datetimesplit = trial_info["ObjectVersion"]["WriteTimeStamp"].split()
 
@@ -132,7 +175,18 @@ def convert_plan(plan, export_path):
 
     ds.RTPlanLabel = f"{plan.plan_info['PlanName']}.0"
     ds.RTPlanName = plan.plan_info["PlanName"]
-    ds.RTPlanDescription = plan.pinnacle.patient_info["Comment"]
+    # Stamp Pinnacle's PlanLockStatus and the trial's clinical/unknown
+    # classification into the description so it's visible in any DICOM
+    # viewer or dump. The patient-level Comment field (e.g.
+    # "CT Radiotherapy Planning Scan") is intentionally not carried into
+    # RTPlanDescription — it's a generic per-patient annotation, not
+    # plan-specific, and clutters the description without adding value.
+    ds.RTPlanDescription = append_pinnacle_metadata_for_plan(
+        None,
+        plan,
+        trial_info,
+        max_length=1024,  # RTPlanDescription VR is ST (max 1024)
+    )
     ds.RTPlanDate = ds.StudyDate
     ds.RTPlanTime = ds.StudyTime
 
@@ -151,7 +205,7 @@ def convert_plan(plan, export_path):
     ReferencedStructureSet1 = pydicom.dataset.Dataset()
     ds.ReferencedStructureSetSequence.append(ReferencedStructureSet1)
     ds.ReferencedStructureSetSequence[0].ReferencedSOPClassUID = RTStructSOPClassUID
-    ds.ReferencedStructureSetSequence[0].ReferencedSOPInstanceUID = plan.struct_inst_uid
+    ds.ReferencedStructureSetSequence[0].ReferencedSOPInstanceUID = struct_instance_uid
     ds.ApprovalStatus = (
         "UNAPPROVED"  # TODO: find way to include actual approval status from trial file
     )

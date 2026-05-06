@@ -216,25 +216,22 @@ def convert_dose(plan, export_path):
 
     ds.TissueHeterogeneityCorrection = "IMAGE"
 
-    # Use the same plan UID for all trials, and generate a fresh dose UID each time.
-    planInstanceUID = plan.plan_inst_uid
-    ds.ReferencedRTPlanSequence[0].ReferencedSOPInstanceUID = planInstanceUID
-
-    # Process each trial
+    # Process each trial. Both the dose UID *and* the referenced plan UID
+    # must be regenerated per trial so that each RD file references the
+    # specific RP file that ``convert_plan`` writes for the same trial.
     for trial_info in plan.trials:
         plan.active_trial = trial_info["Name"]
         plan.logger.info("Exporting Dose for trial: %s", trial_info["Name"])
 
-        # Separate dose UID for each trial
-        doseInstanceUID = pydicom.uid.generate_uid(
-            prefix=f"{plan._uid_prefix}2.",
-            entropy_srcs=[
-                plan.pinnacle.patient_info["MedicalRecordNumber"],
-                plan_info["PlanName"],
-                trial_info["Name"],
-                trial_info["ObjectVersion"]["WriteTimeStamp"],
-            ],
-        )
+        # Generate a matching set of UIDs for this trial. We need the plan
+        # UID to write into ReferencedRTPlanSequence; the dose UID becomes
+        # this RD's SOPInstanceUID. The struct UID is unused here but is
+        # produced by the same call so we don't drift away from the values
+        # rtplan/rtstruct will use for the same trial.
+        uids = plan.generate_uids_for_trial(trial_info)
+        doseInstanceUID = uids["dose"]
+        planInstanceUID = uids["plan"]
+        ds.ReferencedRTPlanSequence[0].ReferencedSOPInstanceUID = planInstanceUID
 
         # Calculate dose origin for this trial
         dose_origin = [
@@ -244,16 +241,23 @@ def convert_dose(plan, export_path):
         ]
 
         # Call the trial-specific dose conversion function
-        convert_dose_for_trial(
-            plan,
-            trial_info,
-            doseInstanceUID,
-            planInstanceUID,
-            dose_origin,
-            patient_position,
-            ds,
-            export_path,
-        )
+        try:
+            convert_dose_for_trial(
+                plan,
+                trial_info,
+                doseInstanceUID,
+                planInstanceUID,
+                dose_origin,
+                patient_position,
+                ds,
+                export_path,
+            )
+        except (MissingTrialBeamsError, MissingBeamDoseError) as exc:
+            # One bad trial shouldn't stop the rest from being exported.
+            plan.logger.warning(
+                "Skipping RTDOSE for trial '%s': %s", trial_info["Name"], exc
+            )
+            continue
 
 
 def convert_dose_for_trial(

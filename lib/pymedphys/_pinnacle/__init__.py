@@ -19,3 +19,10 @@ from .pinnacle import PinnacleExport
 from .pinnacle_cli import export_cli
 from .pinnacle_image import PinnacleImage
 from .pinnacle_plan import PinnaclePlan
+from .pinnacle_metadata import (
+    classify_trial,
+    classify_trial_for_plan,
+    is_clinical_trial,
+    is_clinical_trial_for_plan,
+    parse_lock_status,
+)

@@ -78,6 +78,7 @@ class PinnaclePlan:
         self._points = None  # Data found in plan.Points
         self._patient_setup = None  # Data found in PatientSetup file
         self._primary_image = None  # Primary image for this plan
+        self._plan_info_file = None  # Data found in plan.PlanInfo (per-plan)
         self._uid_prefix = UID_PREFIX  # The prefix for UIDs generated
 
         self._roi_count = 0  # Store the total number of ROIs
@@ -218,6 +219,35 @@ class PinnaclePlan:
         return self._plan_info
 
     @property
+    def plan_info_file(self):
+        """Gets the per-plan ``plan.PlanInfo`` file contents.
+
+        This is distinct from :attr:`plan_info` (which is the ``PlanList``
+        entry from the top-level ``Patient`` file). The per-plan
+        ``Plan_N/plan.PlanInfo`` file carries richer metadata that the
+        ``Patient`` file doesn't include — most notably the lock/approval
+        audit fields (e.g. ``PlanLockStatus``).
+
+        Returns an empty dict if the file is absent (older Pinnacle
+        versions, or partial archives), so callers can use ``.get(...)``
+        without further None-checks.
+
+        Returns
+        -------
+        plan_info_file : dict
+            Contents of ``Plan_N/plan.PlanInfo``, or ``{}`` if missing.
+        """
+        if self._plan_info_file is None:
+            path = os.path.join(self._path, "plan.PlanInfo")
+            if os.path.exists(path):
+                self.logger.debug("Reading plan info file from: %s", path)
+                self._plan_info_file = pinn_to_dict(path) or {}
+            else:
+                self.logger.debug("plan.PlanInfo not found at: %s", path)
+                self._plan_info_file = {}
+        return self._plan_info_file
+
+    @property
     def trial_info(self):
         """Gets the trial information of the active trial.
 
@@ -326,8 +356,69 @@ class PinnaclePlan:
 
         return False
 
+    def generate_uids_for_trial(self, trial_info, uid_type="HASH"):
+        """Generate a fresh set of RTPLAN, RTDOSE and RTSTRUCT UIDs for a
+        specific trial.
+
+        This is the canonical UID source for multi-trial export. It does NOT
+        mutate ``self._plan_inst_uid`` / ``self._struct_inst_uid`` so it is
+        safe to call repeatedly inside a loop over trials without UID values
+        from one trial leaking into another.
+
+        Parameters
+        ----------
+            trial_info : dict
+                The trial dictionary (one entry from ``self.trials``) to
+                generate UIDs for. Trial name and write timestamp are mixed
+                into the entropy so the same trial always hashes to the
+                same UIDs across runs.
+            uid_type : str, optional
+                If 'HASH', deterministic entropy-based UIDs are generated.
+                Anything else falls back to pydicom's random UIDs.
+                Default: 'HASH'.
+
+        Returns
+        -------
+        uids : dict
+            Mapping with keys ``"plan"``, ``"dose"`` and ``"struct"``,
+            each holding the generated SOP Instance UID for that modality.
+        """
+
+        entropy_srcs = None
+        if uid_type == "HASH":
+            entropy_srcs = [
+                self._pinnacle.patient_info["MedicalRecordNumber"],
+                self.plan_info["PlanName"],
+                trial_info["Name"],
+                trial_info["ObjectVersion"]["WriteTimeStamp"],
+            ]
+
+        plan_uid = pydicom.uid.generate_uid(
+            prefix=f"{self._uid_prefix}1.", entropy_srcs=entropy_srcs
+        )
+        dose_uid = pydicom.uid.generate_uid(
+            prefix=f"{self._uid_prefix}2.", entropy_srcs=entropy_srcs
+        )
+        struct_uid = pydicom.uid.generate_uid(
+            prefix=f"{self._uid_prefix}3.", entropy_srcs=entropy_srcs
+        )
+
+        self.logger.debug(
+            "Trial '%s' UIDs - plan: %s, dose: %s, struct: %s",
+            trial_info["Name"], plan_uid, dose_uid, struct_uid,
+        )
+
+        return {"plan": plan_uid, "dose": dose_uid, "struct": struct_uid}
+
     def generate_uids(self, uid_type="HASH"):
-        """Generates UIDs to be used for exporting this plan.
+        """Generates UIDs for the *active* trial and caches them on the plan.
+
+        Retained for backwards compatibility with callers (notably the CLI
+        and the legacy ``plan_inst_uid`` / ``struct_inst_uid`` properties)
+        that expect a single set of UIDs per plan instance.
+
+        Multi-trial export paths should call ``generate_uids_for_trial``
+        directly with each trial in turn instead of relying on this method.
 
         Parameters
         ----------
@@ -337,27 +428,10 @@ class PinnaclePlan:
                 generated. Default: 'HASH'
         """
 
-        entropy_srcs = None
-        if uid_type == "HASH":
-            entropy_srcs = []
-            entropy_srcs.append(self._pinnacle.patient_info["MedicalRecordNumber"])
-            entropy_srcs.append(self.plan_info["PlanName"])
-            entropy_srcs.append(self.trial_info["Name"])
-            entropy_srcs.append(self.trial_info["ObjectVersion"]["WriteTimeStamp"])
-
-        RTPLAN_prefix = f"{self._uid_prefix}1."
-        self._plan_inst_uid = pydicom.uid.generate_uid(
-            prefix=RTPLAN_prefix, entropy_srcs=entropy_srcs
-        )
-
-        RTSTRUCT_prefix = f"{self._uid_prefix}3."
-        self._struct_inst_uid = pydicom.uid.generate_uid(
-            prefix=RTSTRUCT_prefix, entropy_srcs=entropy_srcs
-        )
-
-        self.logger.debug(f"Plan Instance UID: {self._plan_inst_uid}")
-        self.logger.debug(f"Dose Instance UID: {self._dose_inst_uid}")
-        self.logger.debug(f"Struct Instance UID: {self._struct_inst_uid}")
+        uids = self.generate_uids_for_trial(self.trial_info, uid_type=uid_type)
+        self._plan_inst_uid = uids["plan"]
+        self._dose_inst_uid = uids["dose"]
+        self._struct_inst_uid = uids["struct"]
 
     @property
     def plan_inst_uid(self):

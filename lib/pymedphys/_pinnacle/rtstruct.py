@@ -395,17 +395,49 @@ def read_roi(ds, plan, skip_pattern):
     return ds
 
 
+def _sanitize_for_filename(name):
+    """Make a trial name safe for use in a DICOM file name."""
+    return re.sub(r"[^\w\-.]", "_", str(name)) if name else "trial"
+
+
 def convert_struct(plan, export_path, skip_pattern):
-    # Check that the plan has a primary image, as we can't create a meaningful RTSTRUCT without it:
+    """Export RTSTRUCT files for every trial in the plan.
+
+    Although the structure geometry itself does not change between trials,
+    each trial gets its own RTSTRUCT SOP Instance UID so that the matching
+    RTPLAN/RTDOSE produced for that trial reference an RTSTRUCT they can
+    actually find. Sharing one struct UID across trials would force every
+    trial's RP/RD to point at the same RS, which a number of PACS / TPS
+    treat as duplicate-and-drop.
+    """
     if not plan.primary_image:
         plan.logger.error(
             "No primary image found for plan. Unable to generate RTSTRUCT."
         )
         raise MissingCTImageError("Plan has no primary image associated with it.")
 
+    for trial_info in plan.trials:
+        plan.active_trial = trial_info["Name"]
+        plan.logger.info("Exporting RTSTRUCT for trial: %s", trial_info["Name"])
+
+        uids = plan.generate_uids_for_trial(trial_info)
+        convert_struct_for_trial(
+            plan,
+            trial_info,
+            struct_instance_uid=uids["struct"],
+            export_path=export_path,
+            skip_pattern=skip_pattern,
+        )
+
+
+def convert_struct_for_trial(
+    plan, trial_info, struct_instance_uid, export_path, skip_pattern
+):
+    """Write a single RTSTRUCT DICOM file for one specific trial."""
+
     patient_info = plan.pinnacle.patient_info
 
-    struct_sop_instuid = plan.struct_inst_uid
+    struct_sop_instuid = struct_instance_uid
 
     # Populate required values for file meta information
     file_meta = pydicom.dataset.Dataset()
@@ -414,11 +446,9 @@ def convert_struct(plan, export_path, skip_pattern):
     file_meta.MediaStorageSOPInstanceUID = struct_sop_instuid
     file_meta.ImplementationClassUID = GImplementationClassUID
 
-    struct_filename = f"RS.{struct_sop_instuid}.dcm"
+    safe_trial = _sanitize_for_filename(trial_info.get("Name"))
+    struct_filename = f"RS.{safe_trial}.{struct_sop_instuid}.dcm"
 
-    ds = pydicom.dataset.FileDataset(
-        struct_filename, {}, file_meta=file_meta, preamble=b"\x00" * 128
-    )
     ds = pydicom.dataset.FileDataset(
         struct_filename, {}, file_meta=file_meta, preamble=b"\x00" * 128
     )
