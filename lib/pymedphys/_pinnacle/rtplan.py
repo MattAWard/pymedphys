@@ -59,11 +59,279 @@ from .constants import (
 from .pinnacle_metadata import append_pinnacle_metadata_for_plan
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _new_dataset():
+    """Shorthand for creating a new empty DICOM Dataset."""
+    return pydicom.dataset.Dataset()
+
+
+def _new_sequence():
+    """Shorthand for creating a new empty DICOM Sequence."""
+    return pydicom.sequence.Sequence()
+
+
 def _sanitize_for_filename(name):
     """Make a trial name safe for use in a DICOM file name."""
-    # Replace anything that isn't a word char, dash or dot with an underscore
     return re.sub(r"[^\w\-.]", "_", str(name)) if name else "trial"
 
+
+def _generate_leaf_position_boundaries():
+    """Generate the standard 51-element Varian-style MLC leaf position boundaries.
+
+    Boundaries go from -200 to +200 mm in a pattern of:
+      -200 to -100 in 10 mm steps (11 values)
+      -95  to  +95 in  5 mm steps (39 values, but -100 and +100 already counted)
+      +100 to +200 in 10 mm steps
+    Total: 51 boundaries for 50 leaf pairs.
+    """
+    boundaries = []
+    # Outer leaves: -200 to -100 in steps of 10
+    for v in range(-200, -100, 10):
+        boundaries.append(str(v))
+    # Inner leaves: -100 to +100 in steps of 5
+    for v in range(-100, 105, 5):
+        boundaries.append(str(v))
+    # Outer leaves: +110 to +200 in steps of 10
+    for v in range(110, 210, 10):
+        boundaries.append(str(v))
+    return boundaries
+
+
+# Pre-compute the leaf boundaries so we don't rebuild the list on every beam.
+_LEAF_POSITION_BOUNDARIES = _generate_leaf_position_boundaries()
+
+
+def _parse_mlc_leaf_positions(control_point):
+    """Parse MLC leaf positions from a Pinnacle control point dict.
+
+    Returns (leafpositions, p_count) where leafpositions is the interleaved
+    list ready for DICOM and p_count is the total number of raw leaf values.
+    """
+    points_str = control_point["MLCLeafPositions"]["RawData"]["Points[]"]
+    raw_points = points_str.split(",")
+    p_count = len(raw_points)
+
+    bank_a = []  # left bank
+    bank_b = []  # right bank
+    for i, p in enumerate(raw_points):
+        leafpoint = float(p.strip())
+        if i % 2 == 0:
+            bank_a.append(-leafpoint * 10)
+        else:
+            bank_b.append(leafpoint * 10)
+
+    # Reverse both banks and concatenate
+    bank_a = list(reversed(bank_a))
+    bank_b = list(reversed(bank_b))
+    return bank_a + bank_b, p_count
+
+
+def _parse_wedge_info(cp_data, plan_logger):
+    """Parse wedge information from a Pinnacle control point.
+
+    Returns a dict with wedge details, or None if no wedge is present.
+    Keys: type, angle, name, orientation, count.
+    """
+    wedge_context = cp_data["WedgeContext"]
+    wedge_name_raw = wedge_context["WedgeName"]
+
+    if wedge_name_raw in ("No Wedge", ""):
+        plan_logger.debug("No wedge present")
+        return None
+
+    info = {"count": 1, "angle": wedge_context["Angle"]}
+    orientation_raw = wedge_context["Orientation"]
+
+    if "edw" in wedge_name_raw.lower():
+        # Enhanced Dynamic Wedge
+        plan_logger.debug("EDW wedge present")
+        info["type"] = "DYNAMIC"
+        if orientation_raw == "WedgeBottomToTop":
+            info["name"] = f"{wedge_name_raw.upper()}{info['angle']}IN"
+            info["orientation"] = "0"  # TODO: confirm orientation mapping
+        elif orientation_raw == "WedgeTopToBottom":
+            info["name"] = f"{wedge_name_raw.upper()}{info['angle']}OUT"
+            info["orientation"] = "180"
+        plan_logger.debug("EDW wedge name = %s", info.get("name"))
+
+    elif "UP" in wedge_name_raw:
+        # Standard (Universal/Physical) wedge
+        plan_logger.debug("Standard wedge present")
+        info["type"] = "STANDARD"
+        angle_int = int(info["angle"])
+
+        # Map wedge angle to the machine-specific number suffix
+        angle_to_suffix = {15: "30", 30: "30", 45: "20", 60: "15"}
+        number_suffix = angle_to_suffix.get(angle_int, "")
+
+        orientation_to_label = {
+            "WedgeRightToLeft": ("R", "90"),
+            "WedgeLeftToRight": ("L", "270"),
+            "WedgeTopToBottom": ("OUT", "180"),
+            "WedgeBottomToTop": ("IN", "0"),
+        }
+        label, dicom_orientation = orientation_to_label.get(
+            orientation_raw, ("", "0")
+        )
+        info["name"] = f"W{angle_int}{label}{number_suffix}"
+        info["orientation"] = dicom_orientation  # TODO: confirm orientation values
+        plan_logger.debug("Standard wedge name = %s", info["name"])
+    else:
+        # Unknown wedge type — treat as no wedge
+        plan_logger.warning("Unrecognised wedge name: %s", wedge_name_raw)
+        return None
+
+    return info
+
+
+def _populate_beam_limiting_device_seq(beam_ds, p_count):
+    """Populate the BeamLimitingDeviceSequence for a beam.
+
+    Creates entries for ASYMX, ASYMY, and MLCX.
+    """
+    beam_ds.BeamLimitingDeviceSequence = _new_sequence()
+
+    asymx = _new_dataset()
+    asymx.RTBeamLimitingDeviceType = "ASYMX"
+    asymx.NumberOfLeafJawPairs = "1"
+    beam_ds.BeamLimitingDeviceSequence.append(asymx)
+
+    asymy = _new_dataset()
+    asymy.RTBeamLimitingDeviceType = "ASYMY"
+    asymy.NumberOfLeafJawPairs = "1"
+    beam_ds.BeamLimitingDeviceSequence.append(asymy)
+
+    mlcx = _new_dataset()
+    mlcx.RTBeamLimitingDeviceType = "MLCX"
+    mlcx.NumberOfLeafJawPairs = p_count / 2
+    mlcx.LeafPositionBoundaries = _LEAF_POSITION_BOUNDARIES
+    beam_ds.BeamLimitingDeviceSequence.append(mlcx)
+
+
+def _create_bld_position_entries(x1, x2, y1, y2, leafpositions):
+    """Create the three BeamLimitingDevicePositionSequence items for CP 0.
+
+    Returns a Sequence containing ASYMX, ASYMY, and MLCX entries.
+    """
+    bld_seq = _new_sequence()
+
+    asymx = _new_dataset()
+    asymx.RTBeamLimitingDeviceType = "ASYMX"
+    asymx.LeafJawPositions = [x1, x2]
+    bld_seq.append(asymx)
+
+    asymy = _new_dataset()
+    asymy.RTBeamLimitingDeviceType = "ASYMY"
+    asymy.LeafJawPositions = [y1, y2]
+    bld_seq.append(asymy)
+
+    mlcx = _new_dataset()
+    mlcx.RTBeamLimitingDeviceType = "MLCX"
+    mlcx.LeafJawPositions = leafpositions
+    bld_seq.append(mlcx)
+
+    return bld_seq
+
+
+def _create_mlc_only_position_entry(leafpositions):
+    """Create a single-item BeamLimitingDevicePositionSequence for MLC only.
+
+    Used for control points after the first, where only MLC positions change.
+    """
+    bld_seq = _new_sequence()
+    mlcx = _new_dataset()
+    mlcx.RTBeamLimitingDeviceType = "MLCX"
+    mlcx.LeafJawPositions = leafpositions
+    bld_seq.append(mlcx)
+    return bld_seq
+
+
+def _create_wedge_position_seq():
+    """Create a WedgePositionSequence for a control point with wedge IN."""
+    seq = _new_sequence()
+    wp = _new_dataset()
+    wp.WedgePosition = "IN"
+    wp.ReferencedWedgeNumber = "1"
+    seq.append(wp)
+    return seq
+
+
+def _create_wedge_sequence(wedge_info):
+    """Create the beam-level WedgeSequence from parsed wedge info."""
+    seq = _new_sequence()
+    wedge = _new_dataset()
+    wedge.WedgeNumber = 1
+    wedge.WedgeType = wedge_info["type"]
+    wedge.WedgeAngle = wedge_info["angle"]
+    wedge.WedgeID = wedge_info["name"]
+    wedge.WedgeOrientation = wedge_info["orientation"]
+    wedge.WedgeFactor = ""
+    seq.append(wedge)
+    return seq
+
+
+def _populate_first_control_point(cp, beam_ds, beam, plan, beam_energy, doserate,
+                                  gantryangle, colangle, psupportangle,
+                                  gantryrotdir, numwedges,
+                                  x1, x2, y1, y2, leafpositions):
+    """Populate all attributes required by DICOM for the first control point.
+
+    Per DICOM C.8.8.14.5: at the first control point, ALL applicable
+    attributes must be present. This includes 1C and 2C attributes.
+    """
+    # --- Required energy and dose rate (Type 3 but universally expected) ---
+    cp.NominalBeamEnergy = beam_energy
+    cp.DoseRateSet = doserate
+
+    # --- Gantry (1C — required at first CP) ---
+    cp.GantryAngle = gantryangle
+    cp.GantryRotationDirection = gantryrotdir
+
+    # --- Collimator (1C — required at first CP) ---
+    cp.BeamLimitingDeviceAngle = colangle
+    cp.BeamLimitingDeviceRotationDirection = "NONE"
+
+    # --- Patient Support / Couch (1C — required at first CP) ---
+    cp.PatientSupportAngle = psupportangle
+    cp.PatientSupportRotationDirection = "NONE"
+
+    # --- Table Top Eccentric (1C — required at first CP) ---
+    cp.TableTopEccentricAngle = "0"
+    cp.TableTopEccentricRotationDirection = "NONE"
+
+    # --- Table Top Position (2C — required at first CP, may be empty) ---
+    cp.TableTopVerticalPosition = ""
+    cp.TableTopLongitudinalPosition = ""
+    cp.TableTopLateralPosition = ""
+
+    # --- Isocenter (2C — required at first CP when isocentric) ---
+    cp.IsocenterPosition = plan.iso_center
+
+    # --- Source to Surface Distance (Type 3) ---
+    cp.SourceToSurfaceDistance = beam["SSD"] * 10
+
+    # --- Wedge position (1C — required when wedges present) ---
+    if numwedges > 0:
+        cp.WedgePositionSequence = _create_wedge_position_seq()
+
+    # --- Beam Limiting Device positions (1C) ---
+    cp.BeamLimitingDevicePositionSequence = _create_bld_position_entries(
+        x1, x2, y1, y2, leafpositions
+    )
+
+    # --- Beam-level counts (Type 1 — placed here for locality but belong to beam) ---
+    beam_ds.NumberOfWedges = numwedges
+    beam_ds.NumberOfCompensators = "0"
+    beam_ds.NumberOfBoli = "0"
+    beam_ds.NumberOfBlocks = "0"
+
+
+# ---------------------------------------------------------------------------
+# Top-level entry point
+# ---------------------------------------------------------------------------
 
 def convert_plan(plan, export_path):
     """Export RTPLAN files for every trial in the plan.
@@ -74,15 +342,14 @@ def convert_plan(plan, export_path):
     written RTPLAN's ``ReferencedStructureSetSequence`` lines up with the
     RTSTRUCT that ``convert_struct`` will emit for the same trial.
     """
-    # Check that the plan has a primary image, as we can't create a
-    # meaningful RTPLAN without it:
     if not plan.primary_image:
         plan.logger.error("No primary image found for plan. Unable to generate RTPLAN.")
         raise MissingCTImageError("Plan has no primary image associated with it.")
 
     # TODO Fix the RTPLAN export functionality and remove this warning
     plan.logger.warning(
-        "RTPLAN export functionality is currently not validated and not stable. Use with caution."
+        "RTPLAN export functionality is currently not validated and not stable. "
+        "Use with caution."
     )
 
     for trial_info in plan.trials:
@@ -96,21 +363,26 @@ def convert_plan(plan, export_path):
                 trial_info,
                 plan_instance_uid=uids["plan"],
                 struct_instance_uid=uids["struct"],
+                series_instance_uid=uids["series_plan"],
                 export_path=export_path,
             )
         except MissingTrialBeamsError as exc:
-            # One trial having no beams shouldn't stop the others.
             plan.logger.warning(
                 "Skipping RTPLAN for trial '%s': %s", trial_info["Name"], exc
             )
             continue
 
 
+# ---------------------------------------------------------------------------
+# Per-trial RTPLAN generation
+# ---------------------------------------------------------------------------
+
 def convert_plan_for_trial(
     plan,
     trial_info,
     plan_instance_uid,
     struct_instance_uid,
+    series_instance_uid,
     export_path,
 ):
     """Write a single RTPLAN DICOM file for one specific trial."""
@@ -119,35 +391,28 @@ def convert_plan_for_trial(
     plan_info = plan.plan_info
     image_info = plan.primary_image.image_info[0]
     machine_info = plan.machine_info
-
     patient_position = plan.patient_position
 
-    planInstanceUID = plan_instance_uid
-
-    # Populate required values for file meta information
-    file_meta = pydicom.dataset.Dataset()
+    # --- File meta ---
+    file_meta = _new_dataset()
     file_meta.MediaStorageSOPClassUID = RTPlanSOPClassUID
     file_meta.TransferSyntaxUID = GTransferSyntaxUID
-    file_meta.MediaStorageSOPInstanceUID = planInstanceUID
+    file_meta.MediaStorageSOPInstanceUID = plan_instance_uid
     file_meta.ImplementationClassUID = GImplementationClassUID
 
-    # Create the pydicom.dataset.FileDataset instance (initially no data
-    # elements, but file_meta supplied). Filename includes the trial name so
-    # multiple trials don't collide on disk.
     safe_trial = _sanitize_for_filename(trial_info.get("Name"))
-    RPfilename = f"RP.{safe_trial}.{planInstanceUID}.dcm"
+    rp_filename = f"RP.{safe_trial}.{plan_instance_uid}.dcm"
     ds = pydicom.dataset.FileDataset(
-        RPfilename, {}, file_meta=file_meta, preamble=b"\x00" * 128
+        rp_filename, {}, file_meta=file_meta, preamble=b"\x00" * 128
     )
 
+    # --- Study / Patient level ---
     ds.SpecificCharacterSet = "ISO_IR 100"
     ds.InstanceCreationDate = time.strftime("%Y%m%d")
     ds.InstanceCreationTime = time.strftime("%H%M%S")
+    ds.SOPClassUID = RTPlanSOPClassUID
+    ds.SOPInstanceUID = plan_instance_uid
 
-    ds.SOPClassUID = RTPlanSOPClassUID  # RT Plan Storage
-    ds.SOPInstanceUID = planInstanceUID
-
-    # Read more accurate date from trial file if it is available
     datetimesplit = plan_info["ObjectVersion"]["WriteTimeStamp"].split()
     if trial_info:
         datetimesplit = trial_info["ObjectVersion"]["WriteTimeStamp"].split()
@@ -165,118 +430,108 @@ def convert_plan_for_trial(
     ds.PatientBirthDate = patient_info["DOB"]
     ds.PatientID = patient_info["MedicalRecordNumber"]
     ds.PatientSex = patient_info["Gender"][0]
-
     ds.StudyInstanceUID = image_info["StudyInstanceUID"]
-    ds.SeriesInstanceUID = planInstanceUID
+    ds.SeriesInstanceUID = series_instance_uid
     ds.StudyID = plan.primary_image.image["StudyID"]
-
     ds.FrameOfReferenceUID = image_info["FrameUID"]
     ds.PositionReferenceIndicator = ""
 
-    ds.RTPlanLabel = f"{plan.plan_info['PlanName']}.0"
-    ds.RTPlanName = plan.plan_info["PlanName"]
-    # Stamp Pinnacle's PlanLockStatus and the trial's clinical/unknown
-    # classification into the description so it's visible in any DICOM
-    # viewer or dump. The patient-level Comment field (e.g.
-    # "CT Radiotherapy Planning Scan") is intentionally not carried into
-    # RTPlanDescription — it's a generic per-patient annotation, not
-    # plan-specific, and clutters the description without adding value.
+    # --- Plan identification ---
+    ds.RTPlanLabel = f"{plan_info['PlanName']}.0"
+    ds.RTPlanName = plan_info["PlanName"]
     ds.RTPlanDescription = append_pinnacle_metadata_for_plan(
-        None,
-        plan,
-        trial_info,
-        max_length=1024,  # RTPlanDescription VR is ST (max 1024)
+        None, plan, trial_info, max_length=1024,
     )
     ds.RTPlanDate = ds.StudyDate
     ds.RTPlanTime = ds.StudyTime
-
-    ds.PlanIntent = (
-        ""  # TODO: palliative/ curative - find where to get this information from
-    )
+    ds.PlanIntent = ""  # TODO: palliative/curative — find source
     ds.RTPlanGeometry = "PATIENT"
-    # TODO: find what goes in DoseReferenceSequence - should be  a target volume and reference point I think...
-    # ds.DoseReferenceSequence = pydicom.sequence.Sequence()
-    # TODO: find what goes in ToleranceTableSequence
-    # ds.ToleranceTableSequence = pydicom.sequence.Sequence()
-    ds.FractionGroupSequence = pydicom.sequence.Sequence()
-    ds.BeamSequence = pydicom.sequence.Sequence()
-    ds.PatientSetupSequence = pydicom.sequence.Sequence()  # need one per beam
-    ds.ReferencedStructureSetSequence = pydicom.sequence.Sequence()
-    ReferencedStructureSet1 = pydicom.dataset.Dataset()
-    ds.ReferencedStructureSetSequence.append(ReferencedStructureSet1)
-    ds.ReferencedStructureSetSequence[0].ReferencedSOPClassUID = RTStructSOPClassUID
-    ds.ReferencedStructureSetSequence[0].ReferencedSOPInstanceUID = struct_instance_uid
-    ds.ApprovalStatus = (
-        "UNAPPROVED"  # TODO: find way to include actual approval status from trial file
-    )
 
-    ds.FractionGroupSequence.append(pydicom.dataset.Dataset())
-    ds.FractionGroupSequence[0].ReferencedBeamSequence = pydicom.sequence.Sequence()
+    # --- Referenced Structure Set ---
+    ds.ReferencedStructureSetSequence = _new_sequence()
+    ref_struct = _new_dataset()
+    ref_struct.ReferencedSOPClassUID = RTStructSOPClassUID
+    ref_struct.ReferencedSOPInstanceUID = struct_instance_uid
+    ds.ReferencedStructureSetSequence.append(ref_struct)
+
+    ds.ApprovalStatus = "UNAPPROVED"  # TODO: derive from trial file
+
+    # --- Fraction Group ---
+    ds.FractionGroupSequence = _new_sequence()
+    fraction_group = _new_dataset()
+    fraction_group.ReferencedBeamSequence = _new_sequence()
+    ds.FractionGroupSequence.append(fraction_group)
+
+    # --- Sequences that are populated per-beam ---
+    ds.BeamSequence = _new_sequence()
+    ds.PatientSetupSequence = _new_sequence()
 
     metersetweight = ["0"]
-
     num_fractions = 0
     beam_count = 0
+
     beam_list = trial_info["BeamList"] if trial_info["BeamList"] else []
     if len(beam_list) == 0:
         plan.logger.warning("No Beams found in Trial. Unable to generate RTPLAN.")
         raise MissingTrialBeamsError("No Beams found in Trial.")
 
+    # =======================================================================
+    # BEAM LOOP
+    # =======================================================================
     for beam in beam_list:
-        beam_count = beam_count + 1
-
+        beam_count += 1
         plan.logger.info("Exporting Plan for beam: %s", beam["Name"])
 
-        ds.PatientSetupSequence.append(pydicom.dataset.Dataset())
-        ds.PatientSetupSequence[beam_count - 1].PatientPosition = patient_position
-        ds.PatientSetupSequence[beam_count - 1].PatientSetupNumber = beam_count
+        # --- Patient Setup (one per beam) ---
+        patient_setup = _new_dataset()
+        patient_setup.PatientPosition = patient_position
+        patient_setup.PatientSetupNumber = beam_count
+        ds.PatientSetupSequence.append(patient_setup)
 
-        ds.FractionGroupSequence[0].ReferencedBeamSequence.append(
-            pydicom.dataset.Dataset()
-        )
-        ds.FractionGroupSequence[0].ReferencedBeamSequence[
-            beam_count - 1
-        ].ReferencedBeamNumber = beam_count
-        ds.BeamSequence.append(pydicom.dataset.Dataset())
+        # --- Referenced Beam in Fraction Group ---
+        ref_beam = _new_dataset()
+        ref_beam.ReferencedBeamNumber = beam_count
+        fraction_group.ReferencedBeamSequence.append(ref_beam)
 
-        ds.BeamSequence[
-            beam_count - 1
-        ].Manufacturer = Manufacturer  # TODO: should this be something else?
-        ds.BeamSequence[beam_count - 1].BeamNumber = beam_count
-        ds.BeamSequence[beam_count - 1].TreatmentDeliveryType = "TREATMENT"
-        ds.BeamSequence[beam_count - 1].ReferencedPatientSetupNumber = beam_count
-        ds.BeamSequence[beam_count - 1].SourceAxisDistance = "1000"
-        ds.BeamSequence[beam_count - 1].FinalCumulativeMetersetWeight = "1"
-        ds.BeamSequence[beam_count - 1].PrimaryDosimeterUnit = "MU"
-        ds.BeamSequence[
-            beam_count - 1
-        ].PrimaryFluenceModeSequence = pydicom.sequence.Sequence()
-        ds.BeamSequence[beam_count - 1].PrimaryFluenceModeSequence.append(
-            pydicom.dataset.Dataset()
-        )
-        ds.BeamSequence[beam_count - 1].PrimaryFluenceModeSequence[
-            0
-        ].FluenceMode = "STANDARD"
+        # --- Beam dataset ---
+        beam_ds = _new_dataset()
+        ds.BeamSequence.append(beam_ds)
 
-        ds.BeamSequence[beam_count - 1].BeamName = beam["FieldID"]
-        ds.BeamSequence[beam_count - 1].BeamDescription = beam["Name"]
+        beam_ds.Manufacturer = Manufacturer
+        beam_ds.BeamNumber = beam_count
+        beam_ds.TreatmentDeliveryType = "TREATMENT"
+        beam_ds.ReferencedPatientSetupNumber = beam_count
+        beam_ds.SourceAxisDistance = "1000"
+        beam_ds.FinalCumulativeMetersetWeight = "1"
+        beam_ds.PrimaryDosimeterUnit = "MU"
 
-        if "Photons" in beam["Modality"]:
-            ds.BeamSequence[beam_count - 1].RadiationType = "PHOTON"
-        elif "Electrons" in beam["Modality"]:
-            ds.BeamSequence[beam_count - 1].RadiationType = "ELECTRON"
+        # Primary Fluence Mode
+        beam_ds.PrimaryFluenceModeSequence = _new_sequence()
+        fluence = _new_dataset()
+        fluence.FluenceMode = "STANDARD"
+        beam_ds.PrimaryFluenceModeSequence.append(fluence)
+
+        beam_ds.BeamName = beam["FieldID"]
+        beam_ds.BeamDescription = beam["Name"]
+
+        # Radiation type
+        modality = beam["Modality"]
+        if "Photons" in modality:
+            beam_ds.RadiationType = "PHOTON"
+        elif "Electrons" in modality:
+            beam_ds.RadiationType = "ELECTRON"
         else:
-            ds.BeamSequence[beam_count - 1].RadiationType = ""
+            beam_ds.RadiationType = ""
 
+        # Beam type
         if "STATIC" in beam["SetBeamType"].upper():
-            ds.BeamSequence[beam_count - 1].BeamType = beam["SetBeamType"].upper()
+            beam_ds.BeamType = beam["SetBeamType"].upper()
         else:
-            ds.BeamSequence[beam_count - 1].BeamType = "DYNAMIC"
+            beam_ds.BeamType = "DYNAMIC"
 
-        ds.BeamSequence[beam_count - 1].TreatmentMachineName = beam[
-            "MachineNameAndVersion"
-        ].partition(":")[0]
+        beam_ds.TreatmentMachineName = beam["MachineNameAndVersion"].partition(":")[0]
 
+        # --- Dose Reference Point ---
         doserefpt = None
         for point in plan.points:
             if point["Name"] == beam["PrescriptionPointName"]:
@@ -288,146 +543,67 @@ def convert_plan_for_trial(
             doserefpt = plan.iso_center
 
         plan.logger.debug("Dose reference point: %s", doserefpt)
+        ref_beam.BeamDoseSpecificationPoint = doserefpt
 
-        ds.FractionGroupSequence[0].ReferencedBeamSequence[
-            beam_count - 1
-        ].BeamDoseSpecificationPoint = doserefpt
+        # --- Control Point Manager ---
+        beam_ds.ControlPointSequence = _new_sequence()
 
-        ds.BeamSequence[
-            beam_count - 1
-        ].ControlPointSequence = pydicom.sequence.Sequence()
-
-        cp_manager = {}
-        if "CPManagerObject" in beam["CPManager"]:
-            cp_manager = beam["CPManager"]["CPManagerObject"]
-        else:
-            cp_manager = beam["CPManager"]
+        cp_manager = beam["CPManager"]
+        if "CPManagerObject" in cp_manager:
+            cp_manager = cp_manager["CPManagerObject"]
 
         numctrlpts = cp_manager["NumberOfControlPoints"]
         currentmeterset = 0.0
         plan.logger.debug("Number of control points: %s", numctrlpts)
 
-        x1 = ""
-        x2 = ""
-        y1 = ""
-        y2 = ""
+        # --- Parse control point data from Pinnacle ---
+        # Extract jaw positions (from first CP that has them) and all leaf positions
+        x1 = x2 = y1 = y2 = None
         leafpositions = []
-        for cp in cp_manager["ControlPointList"]:
-            metersetweight.append(cp["Weight"])
+        p_count = 0
+        gantryangle = colangle = psupportangle = 0
+        wedge_info = None
 
-            if x1 == "":
-                x1 = -cp["LeftJawPosition"] * 10
-            if x2 == "":
-                x2 = cp["RightJawPosition"] * 10
-            if y2 == "":
-                y2 = cp["TopJawPosition"] * 10
-            if y1 == "":
-                y1 = -cp["BottomJawPosition"] * 10
+        for cp_data in cp_manager["ControlPointList"]:
+            metersetweight.append(cp_data["Weight"])
 
-            points = cp["MLCLeafPositions"]["RawData"]["Points[]"].split(",")
-            p_count = 0
-            leafpositions1 = []
-            leafpositions2 = []
-            for p in points:
-                leafpoint = float(p.strip())
-                if p_count % 2 == 0:
-                    leafpositions1.append(-leafpoint * 10)
-                else:
-                    leafpositions2.append(leafpoint * 10)
-                p_count += 1
+            # Jaw positions — keep only the first values encountered
+            if x1 is None:
+                x1 = -cp_data["LeftJawPosition"] * 10
+            if x2 is None:
+                x2 = cp_data["RightJawPosition"] * 10
+            if y2 is None:
+                y2 = cp_data["TopJawPosition"] * 10
+            if y1 is None:
+                y1 = -cp_data["BottomJawPosition"] * 10
 
-                if p_count == len(points):
-                    leafpositions1 = list(reversed(leafpositions1))
-                    leafpositions2 = list(reversed(leafpositions2))
-                    leafpositions = leafpositions1 + leafpositions2
+            # MLC leaf positions
+            leafpositions, p_count = _parse_mlc_leaf_positions(cp_data)
 
-            gantryangle = cp["Gantry"]
-            colangle = cp["Collimator"]
-            psupportangle = cp["Couch"]
-            numwedges = 0
-            if (
-                cp["WedgeContext"]["WedgeName"] == "No Wedge"
-                or cp["WedgeContext"]["WedgeName"] == ""
-            ):
-                # wedgeflag = False
-                plan.logger.debug("Wedge is no name")
-                numwedges = 0
-            elif (
-                "edw" in cp["WedgeContext"]["WedgeName"]
-                or "EDW" in cp["WedgeContext"]["WedgeName"]
-            ):
-                plan.logger.debug("Wedge present")
-                wedgetype = "DYNAMIC"
-                # wedgeflag = True
-                numwedges = 1
-                wedgeangle = cp["WedgeContext"]["Angle"]
-                wedgeinorout = ""
-                wedgeinorout = cp["WedgeContext"]["Orientation"]
-                if wedgeinorout == "WedgeBottomToTop":
-                    wedgename = (
-                        f"{cp['WedgeContext']['WedgeName'].upper()}{wedgeangle}IN"
-                    )
-                    wedgeorientation = (
-                        "0"  # TODO: temporary until we find what to enter here
-                    )
-                elif wedgeinorout == "WedgeTopToBottom":
-                    wedgename = (
-                        f"{cp['WedgeContext']['WedgeName'].upper()}{wedgeangle}OUT"
-                    )
-                    wedgeorientation = "180"
-                plan.logger.debug("Wedge name = %s", wedgename)
-            elif "UP" in cp["WedgeContext"]["WedgeName"]:
-                plan.logger.debug("Wedge present")
-                wedgetype = "STANDARD"
-                # wedgeflag = True
-                numwedges = 1  # TODO: can we assume only one wedge per beam?
-                wedgeangle = cp["WedgeContext"]["Angle"]
-                wedgeinorout = ""
-                wedgeinorout = cp["WedgeContext"]["Orientation"]
-                if int(wedgeangle) == 15:
-                    numberinname = "30"
-                elif int(wedgeangle) == 45:
-                    numberinname = "20"
-                elif int(wedgeangle) == 30:
-                    numberinname = "30"
-                elif int(wedgeangle) == 60:
-                    numberinname = "15"
-                if wedgeinorout == "WedgeRightToLeft":
-                    wedgename = f"W{int(wedgeangle)}R{numberinname}"
-                    wedgeorientation = (
-                        "90"  # TODO: temporary until we find what to enter here
-                    )
-                elif wedgeinorout == "WedgeLeftToRight":
-                    wedgename = f"W{int(wedgeangle)}L{numberinname}"
-                    wedgeorientation = "270"
-                elif wedgeinorout == "WedgeTopToBottom":
-                    wedgename = f"W{int(wedgeangle)}OUT{numberinname}"
-                    wedgeorientation = (
-                        "180"  # TODO: temporary until we find what to enter here
-                    )
-                elif wedgeinorout == "WedgeBottomToTop":
-                    wedgename = f"W{int(wedgeangle)}IN{numberinname}"
-                    wedgeorientation = (
-                        "0"  # TODO: temporary until we find what to enter here
-                    )
-                plan.logger.debug("Wedge name = %s", wedgename)
+            # Mechanical angles
+            gantryangle = cp_data["Gantry"]
+            colangle = cp_data["Collimator"]
+            psupportangle = cp_data["Couch"]
 
-        # Get the prescription for this beam
+            # Wedge
+            wedge_info = _parse_wedge_info(cp_data, plan.logger)
+
+        numwedges = wedge_info["count"] if wedge_info else 0
+
+        # --- Prescription and energy ---
         prescription = [
-            p
-            for p in trial_info["PrescriptionList"]
+            p for p in trial_info["PrescriptionList"]
             if p["Name"] == beam["PrescriptionName"]
         ][0]
 
-        # Get the machine name and version and energy name for this beam
-        machinenameandversion = beam["MachineNameAndVersion"].split(": ")
-        machinename = machinenameandversion[0]
-        machineversion = machinenameandversion[1]
+        machine_name_ver = beam["MachineNameAndVersion"].split(": ")
+        machinename = machine_name_ver[0]
+        machineversion = machine_name_ver[1]
         machineenergyname = beam["MachineEnergyName"]
 
-        beam_energy = re.findall(r"[-+]?\d*\.\d+|\d+", beam["MachineEnergyName"])[0]
+        beam_energy = re.findall(r"[-+]?\d*\.\d+|\d+", machineenergyname)[0]
 
-        # Find the DosePerMuAtCalibration parameter from the machine data
+        # Find DosePerMuAtCalibration from machine data
         dose_per_mu_at_cal = -1
         if (
             machine_info["Name"] == machinename
@@ -446,619 +622,169 @@ def convert_plan_for_trial(
         normdose = beam["MonitorUnitInfo"]["NormalizedDose"]
 
         if normdose == 0:
-            ds.FractionGroupSequence[0].ReferencedBeamSequence[
-                beam_count - 1
-            ].BeamMeterset = 0
+            ref_beam.BeamMeterset = 0
         else:
-            ds.FractionGroupSequence[0].ReferencedBeamSequence[
-                beam_count - 1
-            ].BeamDose = prescripdose / 100
-            ds.FractionGroupSequence[0].ReferencedBeamSequence[
-                beam_count - 1
-            ].BeamMeterset = prescripdose / (normdose * dose_per_mu_at_cal)
+            ref_beam.BeamDose = prescripdose / 100
+            ref_beam.BeamMeterset = prescripdose / (normdose * dose_per_mu_at_cal)
 
+        # Gantry rotation direction
         gantryrotdir = "NONE"
-        if "GantryIsCCW" in cp_manager:
-            if (
-                cp_manager["GantryIsCCW"] == 1
-            ):  # TODO: check this against whether gantry is rotating or not
-                gantryrotdir = "CC"
-        if "GantryIsCW" in cp_manager:
-            if cp_manager["GantryIsCW"] == 1:
-                gantryrotdir = "CW"
+        if cp_manager.get("GantryIsCCW") == 1:
+            gantryrotdir = "CC"
+        if cp_manager.get("GantryIsCW") == 1:
+            gantryrotdir = "CW"
 
-        plan.logger.debug(
-            "Beam MU: %s",
-            ds.FractionGroupSequence[0]
-            .ReferencedBeamSequence[beam_count - 1]
-            .BeamMeterset,
-        )
+        plan.logger.debug("Beam MU: %s", ref_beam.BeamMeterset)
 
-        doserate = 0
-        if "DoseRate" in beam:  # TODO What to do if DoseRate isn't available in Beam?
-            doserate = beam["DoseRate"]
-        if (
+        doserate = beam.get("DoseRate", 0)
+
+        # ===================================================================
+        # Branch: Step & Shoot vs. Non-Step-and-Shoot
+        # ===================================================================
+        is_step_and_shoot = (
             "STEP" in beam["SetBeamType"].upper()
             and "SHOOT" in beam["SetBeamType"].upper()
-        ):
-            plan.logger.debug("Using Step & Shoot")
+        )
 
-            ds.BeamSequence[beam_count - 1].NumberOfControlPoints = numctrlpts * 2
-            ds.BeamSequence[beam_count - 1].SourceToSurfaceDistance = beam["SSD"] * 10
-
-            if numwedges > 0:
-                ds.BeamSequence[
-                    beam_count - 1
-                ].WedgeSequence = pydicom.sequence.Sequence()
-                ds.BeamSequence[beam_count - 1].WedgeSequence.append(
-                    pydicom.dataset.Dataset()
-                )
-                ds.BeamSequence[beam_count - 1].WedgeSequence[
-                    0
-                ].WedgeNumber = 1  # TODO: can we assume only one wedge per beam?
-                ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeType = wedgetype
-                ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeAngle = wedgeangle
-                ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeID = wedgename
-                ds.BeamSequence[beam_count - 1].WedgeSequence[
-                    0
-                ].WedgeOrientation = wedgeorientation
-                ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeFactor = ""
-
-            metercount = 1
-            for j in range(0, numctrlpts * 2):
-                ds.BeamSequence[beam_count - 1].ControlPointSequence.append(
-                    pydicom.dataset.Dataset()
-                )
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].ControlPointIndex = j
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].BeamLimitingDevicePositionSequence = pydicom.sequence.Sequence()
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].ReferencedDoseReferenceSequence = pydicom.sequence.Sequence()
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].ReferencedDoseReferenceSequence.append(pydicom.dataset.Dataset())
-                if j % 2 == 1:  # odd number control point
-                    currentmeterset = currentmeterset + float(
-                        metersetweight[metercount]
-                    )
-                    metercount = metercount + 1
-
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].CumulativeMetersetWeight = currentmeterset
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].ReferencedDoseReferenceSequence[
-                    0
-                ].CumulativeDoseReferenceCoefficient = currentmeterset
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].ReferencedDoseReferenceSequence[0].ReferencedDoseReferenceNumber = "1"
-
-                if j == 0:  # first control point beam meterset always zero
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].NominalBeamEnergy = beam_energy
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].DoseRateSet = doserate
-
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].GantryRotationDirection = "NONE"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].GantryAngle = gantryangle
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDeviceAngle = colangle
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDeviceRotationDirection = "NONE"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].SourceToSurfaceDistance = beam["SSD"] * 10
-
-                    if numwedges > 0:
-                        ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                            j
-                        ].WedgePositionSequence = pydicom.sequence.Sequence()
-                        ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                            j
-                        ].WedgePositionSequence.append(pydicom.dataset.Dataset())
-                        ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                            j
-                        ].WedgePositionSequence[0].WedgePosition = "IN"
-                        ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                            j
-                        ].WedgePositionSequence[0].ReferencedWedgeNumber = "1"
-
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence.append(
-                        pydicom.dataset.Dataset()
-                    )  # This will be the x jaws
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence.append(
-                        pydicom.dataset.Dataset()
-                    )  # this will be the y jaws
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        0
-                    ].RTBeamLimitingDeviceType = "ASYMX"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[0].LeafJawPositions = [x1, x2]
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        1
-                    ].RTBeamLimitingDeviceType = "ASYMY"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[1].LeafJawPositions = [y1, y2]
-
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence.append(
-                        pydicom.dataset.Dataset()
-                    )  # this will be the MLC
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        2
-                    ].RTBeamLimitingDeviceType = "MLCX"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        2
-                    ].LeafJawPositions = leafpositions
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].SourceToSurfaceDistance = beam["SSD"] * 10
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDeviceRotationDirection = "NONE"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].PatientSupportAngle = psupportangle
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].PatientSupportRotationDirection = "NONE"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].IsocenterPosition = plan.iso_center
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].GantryRotationDirection = gantryrotdir
-                else:
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence.append(
-                        pydicom.dataset.Dataset()
-                    )  # This will be the mlcs for control points other than the first
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        0
-                    ].RTBeamLimitingDeviceType = "MLCX"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        0
-                    ].LeafJawPositions = leafpositions
-                ds.BeamSequence[
-                    beam_count - 1
-                ].NumberOfWedges = (
-                    numwedges  # TODO: can we assume only one wedge per beam?
-                )
-                ds.BeamSequence[
-                    beam_count - 1
-                ].NumberOfCompensators = "0"  # TODO: temporary until we find where to get this information from
-                ds.BeamSequence[
-                    beam_count - 1
-                ].NumberOfBoli = "0"  # TODO: temporary until we find where to get this information from
-                ds.BeamSequence[
-                    beam_count - 1
-                ].NumberOfBlocks = "0"  # TODO: temporary until we find where to get this information from
-                ds.BeamSequence[
-                    beam_count - 1
-                ].BeamLimitingDeviceSequence = pydicom.sequence.Sequence()
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence.append(
-                    pydicom.dataset.Dataset()
-                )
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence.append(
-                    pydicom.dataset.Dataset()
-                )
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence.append(
-                    pydicom.dataset.Dataset()
-                )
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    0
-                ].RTBeamLimitingDeviceType = "ASYMX"
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    1
-                ].RTBeamLimitingDeviceType = "ASYMY"
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    2
-                ].RTBeamLimitingDeviceType = "MLCX"
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    0
-                ].NumberOfLeafJawPairs = "1"
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    1
-                ].NumberOfLeafJawPairs = "1"
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    2
-                ].NumberOfLeafJawPairs = p_count / 2
-                bounds = [
-                    "-200",
-                    "-190",
-                    "-180",
-                    "-170",
-                    "-160",
-                    "-150",
-                    "-140",
-                    "-130",
-                    "-120",
-                    "-110",
-                    "-100",
-                    "-95",
-                    "-90",
-                    "-85",
-                    "-80",
-                    "-75",
-                    "-70",
-                    "-65",
-                    "-60",
-                    "-55",
-                    "-50",
-                    "-45",
-                    "-40",
-                    "-35",
-                    "-30",
-                    "-25",
-                    "-20",
-                    "-15",
-                    "-10",
-                    "-5",
-                    "0",
-                    "5",
-                    "10",
-                    "15",
-                    "20",
-                    "25",
-                    "30",
-                    "35",
-                    "40",
-                    "45",
-                    "50",
-                    "55",
-                    "60",
-                    "65",
-                    "70",
-                    "75",
-                    "80",
-                    "85",
-                    "90",
-                    "95",
-                    "100",
-                    "110",
-                    "120",
-                    "130",
-                    "140",
-                    "150",
-                    "160",
-                    "170",
-                    "180",
-                    "190",
-                    "200",
-                ]
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    2
-                ].LeafPositionBoundaries = bounds
+        if is_step_and_shoot:
+            _build_step_and_shoot_control_points(
+                beam_ds, beam, plan, numctrlpts, metersetweight,
+                beam_energy, doserate, gantryangle, colangle, psupportangle,
+                gantryrotdir, numwedges, wedge_info,
+                x1, x2, y1, y2, leafpositions, p_count,
+            )
         else:
-            plan.logger.debug("Not using Step & Shoot")
-            ds.BeamSequence[beam_count - 1].NumberOfControlPoints = numctrlpts + 1
-            ds.BeamSequence[beam_count - 1].SourceToSurfaceDistance = beam["SSD"] * 10
-            if numwedges > 0:
-                ds.BeamSequence[
-                    beam_count - 1
-                ].WedgeSequence = pydicom.sequence.Sequence()
-                ds.BeamSequence[beam_count - 1].WedgeSequence.append(
-                    pydicom.dataset.Dataset()
-                )
+            _build_non_ss_control_points(
+                beam_ds, beam, plan, numctrlpts, metersetweight,
+                beam_energy, doserate, gantryangle, colangle, psupportangle,
+                gantryrotdir, numwedges, wedge_info,
+                x1, x2, y1, y2, leafpositions, p_count,
+            )
 
-                ds.BeamSequence[beam_count - 1].WedgeSequence[
-                    0
-                ].WedgeNumber = 1  # TODO: can we assume only one wedge per beam?
-
-                ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeType = wedgetype
-                ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeAngle = wedgeangle
-                ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeID = wedgename
-                ds.BeamSequence[beam_count - 1].WedgeSequence[
-                    0
-                ].WedgeOrientation = wedgeorientation
-                ds.BeamSequence[beam_count - 1].WedgeSequence[0].WedgeFactor = ""
-            for j in range(0, numctrlpts + 1):
-                ds.BeamSequence[beam_count - 1].ControlPointSequence.append(
-                    pydicom.dataset.Dataset()
-                )
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].ControlPointIndex = j
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].BeamLimitingDevicePositionSequence = pydicom.sequence.Sequence()
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].ReferencedDoseReferenceSequence = pydicom.sequence.Sequence()
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].ReferencedDoseReferenceSequence.append(pydicom.dataset.Dataset())
-                ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                    j
-                ].CumulativeMetersetWeight = metersetweight[j]
-                if j == 0:  # first control point beam meterset always zero
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].NominalBeamEnergy = beam_energy
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].DoseRateSet = doserate
-
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].GantryRotationDirection = "NONE"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].GantryAngle = gantryangle
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDeviceAngle = colangle
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].SourceToSurfaceDistance = beam["SSD"] * 10
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].ReferencedDoseReferenceSequence[
-                        0
-                    ].CumulativeDoseReferenceCoefficient = "0"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].ReferencedDoseReferenceSequence[
-                        0
-                    ].ReferencedDoseReferenceNumber = "1"
-                    if numwedges > 0:
-                        WedgePosition1 = pydicom.dataset.Dataset()
-                        ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                            j
-                        ].WedgePositionSequence = pydicom.sequence.Sequence()
-                        ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                            j
-                        ].WedgePositionSequence.append(WedgePosition1)
-                        ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                            j
-                        ].WedgePositionSequence[0].WedgePosition = "IN"
-                        ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                            j
-                        ].WedgePositionSequence[0].ReferencedWedgeNumber = "1"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence.append(
-                        pydicom.dataset.Dataset()
-                    )  # This will be the x jaws
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence.append(
-                        pydicom.dataset.Dataset()
-                    )  # this will be the y jaws
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        0
-                    ].RTBeamLimitingDeviceType = "ASYMX"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[0].LeafJawPositions = [x1, x2]
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        1
-                    ].RTBeamLimitingDeviceType = "ASYMY"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[1].LeafJawPositions = [y1, y2]
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence.append(
-                        pydicom.dataset.Dataset()
-                    )  # this will be the MLC
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        2
-                    ].RTBeamLimitingDeviceType = "MLCX"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        2
-                    ].LeafJawPositions = leafpositions
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].SourceToSurfaceDistance = beam["SSD"] * 10
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDeviceRotationDirection = "NONE"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].PatientSupportAngle = psupportangle
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].PatientSupportRotationDirection = "NONE"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].IsocenterPosition = plan.iso_center
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].GantryRotationDirection = gantryrotdir
-                    ds.BeamSequence[beam_count - 1].NumberOfWedges = numwedges
-
-                    ds.BeamSequence[
-                        beam_count - 1
-                    ].NumberOfCompensators = "0"  # TODO: temporary until we find where to get this information from
-                    ds.BeamSequence[
-                        beam_count - 1
-                    ].NumberOfBoli = "0"  # TODO: temporary until we find where to get this information from
-                    ds.BeamSequence[
-                        beam_count - 1
-                    ].NumberOfBlocks = "0"  # TODO: temporary until we find where to get this information from
-                else:
-                    # This will be the mlcs for control points other than the first
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence.append(
-                        pydicom.dataset.Dataset()
-                    )
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        0
-                    ].RTBeamLimitingDeviceType = "MLCX"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].BeamLimitingDevicePositionSequence[
-                        0
-                    ].LeafJawPositions = leafpositions
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].ReferencedDoseReferenceSequence[
-                        0
-                    ].CumulativeDoseReferenceCoefficient = "1"
-                    ds.BeamSequence[beam_count - 1].ControlPointSequence[
-                        j
-                    ].ReferencedDoseReferenceSequence[
-                        0
-                    ].ReferencedDoseReferenceNumber = "1"
-
-                ds.BeamSequence[
-                    beam_count - 1
-                ].BeamLimitingDeviceSequence = pydicom.sequence.Sequence()
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence.append(
-                    pydicom.dataset.Dataset()
-                )
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence.append(
-                    pydicom.dataset.Dataset()
-                )
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence.append(
-                    pydicom.dataset.Dataset()
-                )
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    0
-                ].RTBeamLimitingDeviceType = "ASYMX"
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    1
-                ].RTBeamLimitingDeviceType = "ASYMY"
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    2
-                ].RTBeamLimitingDeviceType = "MLCX"
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    0
-                ].NumberOfLeafJawPairs = "1"
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    1
-                ].NumberOfLeafJawPairs = "1"
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    2
-                ].NumberOfLeafJawPairs = p_count / 2
-                bounds = [
-                    "-200",
-                    "-190",
-                    "-180",
-                    "-170",
-                    "-160",
-                    "-150",
-                    "-140",
-                    "-130",
-                    "-120",
-                    "-110",
-                    "-100",
-                    "-95",
-                    "-90",
-                    "-85",
-                    "-80",
-                    "-75",
-                    "-70",
-                    "-65",
-                    "-60",
-                    "-55",
-                    "-50",
-                    "-45",
-                    "-40",
-                    "-35",
-                    "-30",
-                    "-25",
-                    "-20",
-                    "-15",
-                    "-10",
-                    "-5",
-                    "0",
-                    "5",
-                    "10",
-                    "15",
-                    "20",
-                    "25",
-                    "30",
-                    "35",
-                    "40",
-                    "45",
-                    "50",
-                    "55",
-                    "60",
-                    "65",
-                    "70",
-                    "75",
-                    "80",
-                    "85",
-                    "90",
-                    "95",
-                    "100",
-                    "110",
-                    "120",
-                    "130",
-                    "140",
-                    "150",
-                    "160",
-                    "170",
-                    "180",
-                    "190",
-                    "200",
-                ]
-                ds.BeamSequence[beam_count - 1].BeamLimitingDeviceSequence[
-                    2
-                ].LeafPositionBoundaries = bounds
-            numwedges = 0
-
-        # Get the prescription for this beam
-        prescription = [
-            p
-            for p in trial_info["PrescriptionList"]
-            if p["Name"] == beam["PrescriptionName"]
-        ][0]
         num_fractions = prescription["NumberOfFractions"]
+        numwedges = 0  # Reset for next beam
 
-    ds.FractionGroupSequence[0].FractionGroupNumber = 1
-    ds.FractionGroupSequence[0].NumberOfFractionsPlanned = num_fractions
-    ds.FractionGroupSequence[0].NumberOfBeams = beam_count
-    ds.FractionGroupSequence[0].NumberOfBrachyApplicationSetups = "0"
+    # --- Fraction Group summary ---
+    fraction_group.FractionGroupNumber = 1
+    fraction_group.NumberOfFractionsPlanned = num_fractions
+    fraction_group.NumberOfBeams = beam_count
+    fraction_group.NumberOfBrachyApplicationSetups = "0"
 
-    # Save the RTPlan Dicom File
-    output_file = os.path.join(export_path, RPfilename)
+    # --- Save ---
+    output_file = os.path.join(export_path, rp_filename)
     plan.logger.info("Creating Plan file: %s", output_file)
     ds.save_as(output_file, enforce_file_format=True)
+
+
+# ---------------------------------------------------------------------------
+# Step & Shoot control point builder
+# ---------------------------------------------------------------------------
+
+def _build_step_and_shoot_control_points(
+    beam_ds, beam, plan, numctrlpts, metersetweight,
+    beam_energy, doserate, gantryangle, colangle, psupportangle,
+    gantryrotdir, numwedges, wedge_info,
+    x1, x2, y1, y2, leafpositions, p_count,
+):
+    """Build control points for a Step & Shoot beam."""
+    plan.logger.debug("Using Step & Shoot")
+
+    total_cps = numctrlpts * 2
+    beam_ds.NumberOfControlPoints = total_cps
+    beam_ds.SourceToSurfaceDistance = beam["SSD"] * 10
+
+    if numwedges > 0:
+        beam_ds.WedgeSequence = _create_wedge_sequence(wedge_info)
+
+    metercount = 1
+    currentmeterset = 0.0
+
+    for j in range(total_cps):
+        cp = _new_dataset()
+        beam_ds.ControlPointSequence.append(cp)
+
+        cp.ControlPointIndex = j
+        cp.BeamLimitingDevicePositionSequence = _new_sequence()
+        cp.ReferencedDoseReferenceSequence = _new_sequence()
+
+        dose_ref = _new_dataset()
+        cp.ReferencedDoseReferenceSequence.append(dose_ref)
+
+        if j % 2 == 1:  # odd control points carry the meterset weight
+            currentmeterset += float(metersetweight[metercount])
+            metercount += 1
+
+        cp.CumulativeMetersetWeight = currentmeterset
+        dose_ref.CumulativeDoseReferenceCoefficient = currentmeterset
+        dose_ref.ReferencedDoseReferenceNumber = "1"
+
+        if j == 0:
+            # First control point: all attributes must be present (DICOM C.8.8.14.5)
+            _populate_first_control_point(
+                cp, beam_ds, beam, plan, beam_energy, doserate,
+                gantryangle, colangle, psupportangle, gantryrotdir, numwedges,
+                x1, x2, y1, y2, leafpositions,
+            )
+        else:
+            # Subsequent control points: only MLC changes
+            cp.BeamLimitingDevicePositionSequence = _create_mlc_only_position_entry(
+                leafpositions
+            )
+
+    # Beam Limiting Device Sequence (beam level)
+    _populate_beam_limiting_device_seq(beam_ds, p_count)
+
+
+# ---------------------------------------------------------------------------
+# Non-Step-and-Shoot (conformal arc / dynamic) control point builder
+# ---------------------------------------------------------------------------
+
+def _build_non_ss_control_points(
+    beam_ds, beam, plan, numctrlpts, metersetweight,
+    beam_energy, doserate, gantryangle, colangle, psupportangle,
+    gantryrotdir, numwedges, wedge_info,
+    x1, x2, y1, y2, leafpositions, p_count,
+):
+    """Build control points for a non-Step-and-Shoot beam (e.g. conformal arc)."""
+    plan.logger.debug("Not using Step & Shoot")
+
+    total_cps = numctrlpts + 1
+    beam_ds.NumberOfControlPoints = total_cps
+    beam_ds.SourceToSurfaceDistance = beam["SSD"] * 10
+
+    if numwedges > 0:
+        beam_ds.WedgeSequence = _create_wedge_sequence(wedge_info)
+
+    for j in range(total_cps):
+        cp = _new_dataset()
+        beam_ds.ControlPointSequence.append(cp)
+
+        cp.ControlPointIndex = j
+        cp.BeamLimitingDevicePositionSequence = _new_sequence()
+        cp.ReferencedDoseReferenceSequence = _new_sequence()
+
+        dose_ref = _new_dataset()
+        cp.ReferencedDoseReferenceSequence.append(dose_ref)
+
+        cp.CumulativeMetersetWeight = metersetweight[j]
+
+        if j == 0:
+            # First control point: all attributes must be present
+            dose_ref.CumulativeDoseReferenceCoefficient = "0"
+            dose_ref.ReferencedDoseReferenceNumber = "1"
+
+            _populate_first_control_point(
+                cp, beam_ds, beam, plan, beam_energy, doserate,
+                gantryangle, colangle, psupportangle, gantryrotdir, numwedges,
+                x1, x2, y1, y2, leafpositions,
+            )
+        else:
+            # Subsequent control points: only MLC
+            cp.BeamLimitingDevicePositionSequence = _create_mlc_only_position_entry(
+                leafpositions
+            )
+            dose_ref.CumulativeDoseReferenceCoefficient = "1"
+            dose_ref.ReferencedDoseReferenceNumber = "1"
+
+    # Beam Limiting Device Sequence (beam level)
+    _populate_beam_limiting_device_seq(beam_ds, p_count)

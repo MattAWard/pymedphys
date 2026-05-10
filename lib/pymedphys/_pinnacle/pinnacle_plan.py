@@ -356,7 +356,7 @@ class PinnaclePlan:
 
         return False
 
-    def generate_uids_for_trial(self, trial_info, uid_type="HASH"):
+    def generate_uids_for_trial(self, trial_info, uid_type="RANDOM"):
         """Generate a fresh set of RTPLAN, RTDOSE and RTSTRUCT UIDs for a
         specific trial.
 
@@ -365,23 +365,39 @@ class PinnaclePlan:
         safe to call repeatedly inside a loop over trials without UID values
         from one trial leaking into another.
 
+        Each call produces both SOP Instance UIDs and Series Instance UIDs.
+        The Series UIDs are always random (never deterministic) because
+        DICOM requires SeriesInstanceUID to be distinct from SOPInstanceUID
+        — they live at different levels of the DICOM hierarchy.
+
         Parameters
         ----------
             trial_info : dict
                 The trial dictionary (one entry from ``self.trials``) to
                 generate UIDs for. Trial name and write timestamp are mixed
                 into the entropy so the same trial always hashes to the
-                same UIDs across runs.
+                same UIDs across runs (HASH mode only).
             uid_type : str, optional
-                If 'HASH', deterministic entropy-based UIDs are generated.
-                Anything else falls back to pydicom's random UIDs.
-                Default: 'HASH'.
+                If 'HASH', deterministic entropy-based SOP UIDs are
+                generated.  Anything else falls back to pydicom's random
+                UIDs.  Default: 'RANDOM'.
+
+                .. note::
+                    The default was changed from 'HASH' to 'RANDOM' because
+                    deterministic UIDs cause "inconsistent link" rejections
+                    when a PACS/Conquest destination already holds objects
+                    from a previous export of the same patient.  Callers
+                    that genuinely need idempotent UIDs (e.g. offline
+                    scripting where the output folder is wiped each time)
+                    can still pass ``uid_type='HASH'`` explicitly.
 
         Returns
         -------
         uids : dict
-            Mapping with keys ``"plan"``, ``"dose"`` and ``"struct"``,
-            each holding the generated SOP Instance UID for that modality.
+            Mapping with keys ``"plan"``, ``"dose"``, ``"struct"``,
+            ``"series_plan"``, ``"series_dose"`` and ``"series_struct"``.
+            The first three are SOP Instance UIDs; the last three are
+            Series Instance UIDs (always random).
         """
 
         entropy_srcs = None
@@ -403,14 +419,28 @@ class PinnaclePlan:
             prefix=f"{self._uid_prefix}3.", entropy_srcs=entropy_srcs
         )
 
+        # Series Instance UIDs are always random — they must never equal
+        # the SOP Instance UID (different DICOM hierarchy levels) and
+        # deterministic series UIDs offer no benefit.
+        series_plan_uid = pydicom.uid.generate_uid()
+        series_dose_uid = pydicom.uid.generate_uid()
+        series_struct_uid = pydicom.uid.generate_uid()
+
         self.logger.debug(
             "Trial '%s' UIDs - plan: %s, dose: %s, struct: %s",
             trial_info["Name"], plan_uid, dose_uid, struct_uid,
         )
 
-        return {"plan": plan_uid, "dose": dose_uid, "struct": struct_uid}
+        return {
+            "plan": plan_uid,
+            "dose": dose_uid,
+            "struct": struct_uid,
+            "series_plan": series_plan_uid,
+            "series_dose": series_dose_uid,
+            "series_struct": series_struct_uid,
+        }
 
-    def generate_uids(self, uid_type="HASH"):
+    def generate_uids(self, uid_type="RANDOM"):
         """Generates UIDs for the *active* trial and caches them on the plan.
 
         Retained for backwards compatibility with callers (notably the CLI
@@ -424,8 +454,8 @@ class PinnaclePlan:
         ----------
             uid_type : str, optional
                 If 'HASH', the entropy will be generated
-                to hash to consistant UIDs. If not then random UIDs will be
-                generated. Default: 'HASH'
+                to hash to consistent UIDs. If not then random UIDs will be
+                generated. Default: 'RANDOM'
         """
 
         uids = self.generate_uids_for_trial(self.trial_info, uid_type=uid_type)

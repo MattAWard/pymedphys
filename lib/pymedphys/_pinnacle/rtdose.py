@@ -64,9 +64,48 @@ from .constants import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _new_dataset():
+    """Shorthand for creating a new empty DICOM Dataset."""
+    return pydicom.dataset.Dataset()
+
+
+def _new_sequence():
+    """Shorthand for creating a new empty DICOM Sequence."""
+    return pydicom.sequence.Sequence()
+
+
+# Sign maps for dose origin calculation by patient position.
+# Keys: patient_position → (x_sign, y_sign, z_sign)
+_DOSE_ORIGIN_SIGNS = {
+    "HFS": (1, -1, -1),
+    "HFP": (-1, 1, -1),
+    "FFS": (-1, -1, 1),
+    "FFP": (1, 1, 1),
+}
+
+# Image position patient shift directions.
+# Keys: patient_position → (y_shift_sign, z_shift_sign)
+# y_shift_sign: +1 means add ydoseshift, -1 means subtract
+# z_shift_sign: +1 means add zdoseshift, -1 means subtract
+_IMAGE_POSITION_SHIFTS = {
+    "HFS": (-1, -1),
+    "HFP": (+1, -1),
+    "FFS": (-1, +1),
+    "FFP": (+1, +1),
+}
+
+_SUPPORTED_ORIENTATIONS = ("HFS", "HFP", "FFS", "FFP")
+
+
 def construct_dose_from_binary(binary_data, array):
-    """
-    Read binary data into empty dose array
+    """Read binary data into an empty dose array.
+
+    The binary format is big-endian 32-bit floats, ordered Z (high-to-low),
+    Y (low-to-high), X (low-to-high).
     """
     X, Y, Z = array.shape
     idx = 0
@@ -81,8 +120,10 @@ def construct_dose_from_binary(binary_data, array):
 
 
 def read_binary_data(binary_file):
-    """
-    Check if the supplied binary file is non-empty and return the data if so
+    """Check if the supplied binary file exists and is non-empty.
+
+    Returns the binary data if valid, or False if the file is missing or
+    contains only zeros.
     """
     if os.path.isfile(binary_file):
         size = os.path.getsize(binary_file)
@@ -90,84 +131,134 @@ def read_binary_data(binary_file):
             data = b.read()
             if all(byte == 0 for byte in data):
                 return False
-            else:
-                return data
+            return data
+    return False
 
 
 def trilinear_interpolation(idx, grid):
-    """
-    Return trilinear interpolated value for a voxel with index idx within the grid
-    """
+    """Return trilinear interpolated value for a voxel at fractional index.
 
+    Parameters
+    ----------
+    idx : list of float
+        Fractional [x, y, z] indices into the grid.
+    grid : numpy.ndarray
+        3D dose grid.
+
+    Returns
+    -------
+    float
+        Interpolated value.
+    """
     int_idx = [math.floor(f) for f in idx]
     frac_idx = [f % 1 for f in idx]
 
-    l1 = [[[0 for x in range(2)] for x in range(2)] for x in range(2)]
-    for x in range(0, 2):
-        for y in range(0, 2):
-            for z in range(0, 2):
-                l1[x][y][z] = grid[int_idx[0] + x, int_idx[1] + y, int_idx[2] + z]
+    # Sample the 8 corner values of the enclosing voxel
+    corners = [[[0.0] * 2 for _ in range(2)] for _ in range(2)]
+    for x in range(2):
+        for y in range(2):
+            for z in range(2):
+                corners[x][y][z] = grid[
+                    int_idx[0] + x, int_idx[1] + y, int_idx[2] + z
+                ]
 
-    l2 = [[0 for x in range(2)] for x in range(2)]
-    for y in range(0, 2):
-        for z in range(0, 2):
-            l2[y][z] = l1[0][y][z] * (1 - frac_idx[0]) + l1[1][y][z] * frac_idx[0]
+    # Interpolate along X
+    interp_x = [[0.0] * 2 for _ in range(2)]
+    for y in range(2):
+        for z in range(2):
+            interp_x[y][z] = (
+                corners[0][y][z] * (1 - frac_idx[0])
+                + corners[1][y][z] * frac_idx[0]
+            )
 
-    l3 = [0 for x in range(2)]
-    for z in range(0, 2):
-        l3[z] = l2[0][z] * (1 - frac_idx[1]) + l2[1][z] * frac_idx[1]
+    # Interpolate along Y
+    interp_xy = [0.0, 0.0]
+    for z in range(2):
+        interp_xy[z] = (
+            interp_x[0][z] * (1 - frac_idx[1])
+            + interp_x[1][z] * frac_idx[1]
+        )
 
-    return l3[0] * (1 - frac_idx[2]) + l3[1] * frac_idx[2]
+    # Interpolate along Z
+    return interp_xy[0] * (1 - frac_idx[2]) + interp_xy[1] * frac_idx[2]
 
+
+def _get_dose_grid_value(trial_info, axis, property_name):
+    """Get a dose grid property from trial info.
+
+    Example: _get_dose_grid_value(trial_info, 'X', 'Dimension') reads
+    trial_info["DoseGrid .Dimension .X"].
+    """
+    return trial_info[f"DoseGrid .{property_name} .{axis}"]
+
+
+def _get_dose_dimensions(trial_info):
+    """Return (dim_x, dim_y, dim_z) for the dose grid."""
+    return (
+        int(_get_dose_grid_value(trial_info, "X", "Dimension")),
+        int(_get_dose_grid_value(trial_info, "Y", "Dimension")),
+        int(_get_dose_grid_value(trial_info, "Z", "Dimension")),
+    )
+
+
+def _get_voxel_sizes_mm(trial_info):
+    """Return (vx, vy, vz) voxel sizes in mm (Pinnacle stores cm)."""
+    return (
+        _get_dose_grid_value(trial_info, "X", "VoxelSize") * 10,
+        _get_dose_grid_value(trial_info, "Y", "VoxelSize") * 10,
+        _get_dose_grid_value(trial_info, "Z", "VoxelSize") * 10,
+    )
+
+
+def _compute_image_position_patient(dose_origin, voxel_mm, dimensions, patient_position):
+    """Compute ImagePositionPatient for the dose grid.
+
+    The dose origin from Pinnacle is at the grid centre. DICOM needs the
+    corner position, so we shift by (n - 1) * voxel_size along Y and Z
+    depending on the patient orientation.
+    """
+    vx, vy, vz = voxel_mm
+    dim_x, dim_y, dim_z = dimensions
+    ox, oy, oz = dose_origin
+
+    y_shift = vy * dim_y - vy
+    z_shift = vz * dim_z - vz
+
+    y_sign, z_sign = _IMAGE_POSITION_SHIFTS[patient_position]
+
+    return [
+        ox,
+        oy + y_sign * y_shift,
+        oz + z_sign * z_shift,
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Top-level entry point
+# ---------------------------------------------------------------------------
 
 def convert_dose(plan, export_path):
     """Export RTDose files for all trials in the plan.
 
     For each trial, generates unique UIDs and creates an RTDOSE DICOM file.
-
-    Parameters
-    ----------
-    plan : PinnaclePlan
-        The plan object containing trials and plan information.
-    export_path : str
-        Directory where DICOM files will be saved.
     """
-    # Check that the plan has a primary image
     if not plan.primary_image:
         plan.logger.error("No primary image found for plan. Unable to generate RTDOSE.")
         raise MissingCTImageError("Plan has no primary image associated with it.")
-
-    supported_orientations = ("HFS", "HFP", "FFS", "FFP")
 
     patient_info = plan.pinnacle.patient_info
     plan_info = plan.plan_info
     image_info = plan.primary_image.image_info[0]
     patient_position = plan.patient_position
 
-    if patient_position not in supported_orientations:
+    if patient_position not in _SUPPORTED_ORIENTATIONS:
         raise NotImplementedError(
-            f"{patient_position} orientation not supported. Only: "
-            f"{supported_orientations}"
+            f"{patient_position} orientation not supported. "
+            f"Only: {_SUPPORTED_ORIENTATIONS}"
         )
 
-    # Calculate dose origin shifts (plan-level, same for all trials)
-    if patient_position in ("HFP", "FFS"):
-        dose_origin_x_sign = -1
-    elif patient_position in ("HFS", "FFP"):
-        dose_origin_x_sign = 1
-
-    if patient_position in ("HFS", "FFS"):
-        dose_origin_y_sign = -1
-    elif patient_position in ("HFP", "FFP"):
-        dose_origin_y_sign = 1
-
-    if patient_position in ("HFS", "HFP"):
-        dose_origin_z_sign = -1
-    elif patient_position in ("FFS", "FFP"):
-        dose_origin_z_sign = 1
-
-    # Create base DICOM dataset with plan-level metadata (used for all trials)
-    file_meta = pydicom.dataset.Dataset()
+    # --- Build base DICOM dataset (plan-level metadata, shared across trials) ---
+    file_meta = _new_dataset()
     file_meta.MediaStorageSOPClassUID = RTDoseSOPClassUID
     file_meta.TransferSyntaxUID = GTransferSyntaxUID
     file_meta.ImplementationClassUID = GImplementationClassUID
@@ -175,11 +266,11 @@ def convert_dose(plan, export_path):
     ds = pydicom.dataset.FileDataset(
         "RD.dcm", {}, file_meta=file_meta, preamble=b"\x00" * 128
     )
+
     ds.SpecificCharacterSet = "ISO_IR 100"
     ds.InstanceCreationDate = time.strftime("%Y%m%d")
     ds.InstanceCreationTime = time.strftime("%H%M%S")
-
-    ds.SOPClassUID = RTDoseSOPClassUID  # RT Dose Storage
+    ds.SOPClassUID = RTDoseSOPClassUID
 
     ds.AccessionNumber = ""
     ds.Modality = RTDOSEModality
@@ -187,6 +278,7 @@ def convert_dose(plan, export_path):
     ds.OperatorsName = ""
     ds.ManufacturerModelName = plan_info.get("ToolType", "")
     ds.SoftwareVersions = [plan_info["PinnacleVersionDescription"]]
+
     ds.PhysiciansOfRecord = patient_info["RadiationOncologist"]
     ds.PatientName = patient_info["FullName"]
     ds.PatientBirthDate = patient_info["DOB"]
@@ -199,191 +291,169 @@ def convert_dose(plan, export_path):
 
     ds.ImageOrientationPatient = IMAGE_ORIENTATION_MAP[patient_position]
     ds.PositionReferenceIndicator = ""
+
+    # Pixel encoding
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = "MONOCHROME2"
-
     ds.BitsAllocated = 16
     ds.BitsStored = 16
     ds.HighBit = 15
     ds.PixelRepresentation = 0
+
+    # Dose type
     ds.DoseUnits = "GY"
     ds.DoseType = "PHYSICAL"
     ds.DoseSummationType = "PLAN"
-
-    ds.ReferencedRTPlanSequence = pydicom.sequence.Sequence()
-    ds.ReferencedRTPlanSequence.append(pydicom.dataset.Dataset())
-    ds.ReferencedRTPlanSequence[0].ReferencedSOPClassUID = RTPlanSOPClassUID
-
     ds.TissueHeterogeneityCorrection = "IMAGE"
 
-    # Process each trial. Both the dose UID *and* the referenced plan UID
-    # must be regenerated per trial so that each RD file references the
-    # specific RP file that ``convert_plan`` writes for the same trial.
+    # Referenced RT Plan (placeholder — updated per trial)
+    ds.ReferencedRTPlanSequence = _new_sequence()
+    ref_plan = _new_dataset()
+    ref_plan.ReferencedSOPClassUID = RTPlanSOPClassUID
+    ds.ReferencedRTPlanSequence.append(ref_plan)
+
+    # --- Dose origin sign convention ---
+    x_sign, y_sign, z_sign = _DOSE_ORIGIN_SIGNS[patient_position]
+
+    # --- Process each trial ---
     for trial_info in plan.trials:
         plan.active_trial = trial_info["Name"]
         plan.logger.info("Exporting Dose for trial: %s", trial_info["Name"])
 
-        # Generate a matching set of UIDs for this trial. We need the plan
-        # UID to write into ReferencedRTPlanSequence; the dose UID becomes
-        # this RD's SOPInstanceUID. The struct UID is unused here but is
-        # produced by the same call so we don't drift away from the values
-        # rtplan/rtstruct will use for the same trial.
         uids = plan.generate_uids_for_trial(trial_info)
-        doseInstanceUID = uids["dose"]
-        planInstanceUID = uids["plan"]
-        ds.ReferencedRTPlanSequence[0].ReferencedSOPInstanceUID = planInstanceUID
+        dose_uid = uids["dose"]
+        plan_uid = uids["plan"]
+        series_uid = uids["series_dose"]
 
-        # Calculate dose origin for this trial
         dose_origin = [
-            dose_origin_x_sign * trial_info["DoseGrid .Origin .X"] * 10,
-            dose_origin_y_sign * trial_info["DoseGrid .Origin .Y"] * 10,
-            dose_origin_z_sign * trial_info["DoseGrid .Origin .Z"] * 10,
+            x_sign * _get_dose_grid_value(trial_info, "X", "Origin") * 10,
+            y_sign * _get_dose_grid_value(trial_info, "Y", "Origin") * 10,
+            z_sign * _get_dose_grid_value(trial_info, "Z", "Origin") * 10,
         ]
 
-        # Call the trial-specific dose conversion function
         try:
-            convert_dose_for_trial(
-                plan,
-                trial_info,
-                doseInstanceUID,
-                planInstanceUID,
-                dose_origin,
-                patient_position,
-                ds,
-                export_path,
+            _convert_dose_for_trial(
+                plan, trial_info, dose_uid, plan_uid, series_uid,
+                dose_origin, patient_position, ds, export_path,
             )
         except (MissingTrialBeamsError, MissingBeamDoseError) as exc:
-            # One bad trial shouldn't stop the rest from being exported.
             plan.logger.warning(
                 "Skipping RTDOSE for trial '%s': %s", trial_info["Name"], exc
             )
             continue
 
 
-def convert_dose_for_trial(
-    plan,
-    trial_info,
-    doseInstanceUID,
-    planInstanceUID,
-    dose_origin,
-    patient_position,
-    ds,
-    export_path,
+# ---------------------------------------------------------------------------
+# Per-trial dose conversion
+# ---------------------------------------------------------------------------
+
+def _convert_dose_for_trial(
+    plan, trial_info, dose_uid, plan_uid, series_uid,
+    dose_origin, patient_position, ds, export_path,
 ):
-    """Convert dose for a specific trial.
+    """Convert dose for a specific trial and save the RTDOSE DICOM file."""
 
-    Parameters
-    ----------
-    plan : PinnaclePlan
-        The plan object.
-    trial_info : dict
-        The trial dictionary containing dose and beam information.
-    doseInstanceUID : str
-        The DICOM UID for this dose instance.
-    planInstanceUID : str
-        The DICOM UID for the plan instance.
-    dose_origin : list
-        The dose origin [x, y, z] in mm.
-    patient_position : str
-        The patient position code (e.g., "HFS").
-    export_path : str
-        Directory where the DICOM file will be saved.
+    trial_name = trial_info.get("Name", "Unknown")
+    dim_x, dim_y, dim_z = _get_dose_dimensions(trial_info)
+    vx, vy, vz = _get_voxel_sizes_mm(trial_info)
+
+    # --- Compute ImagePositionPatient ---
+    image_position_patient = _compute_image_position_patient(
+        dose_origin, (vx, vy, vz), (dim_x, dim_y, dim_z), patient_position,
+    )
+
+    # --- Update trial-specific DICOM fields ---
+    ds.SOPInstanceUID = dose_uid
+    ds.file_meta.MediaStorageSOPInstanceUID = dose_uid
+    ds.SeriesInstanceUID = series_uid
+
+    # Study date/time (DICOM compliance — must be present)
+    datetimesplit = plan.plan_info["ObjectVersion"]["WriteTimeStamp"].split()
+    if trial_info and "ObjectVersion" in trial_info:
+        datetimesplit = trial_info["ObjectVersion"]["WriteTimeStamp"].split()
+    ds.StudyDate = datetimesplit[0].replace("-", "")
+    ds.StudyTime = datetimesplit[1].replace(":", "")
+
+    ds.SeriesDescription = f"Dose: {trial_name}"
+    ds.InstanceNumber = "1"
+
+    rd_filename = f"RD.{trial_name}.{dose_uid}.dcm"
+    ds.filename = rd_filename
+
+    ds.ImagePositionPatient = image_position_patient
+    ds.NumberOfFrames = dim_z
+    ds.Rows = dim_y
+    ds.Columns = dim_x
+    ds.PixelSpacing = [vx, vy]
+    ds.SliceThickness = vz
+
+    ds.ReferencedRTPlanSequence[0].ReferencedSOPInstanceUID = plan_uid
+
+    # Grid frame offset vector
+    ds.GridFrameOffsetVector = [p * vz for p in range(dim_z)]
+
+    # --- Sum beam doses ---
+    summed_pixel_values = _sum_beam_doses(
+        plan, trial_info, ds, patient_position, dim_x, dim_y, dim_z,
+        (vx, vy, vz), image_position_patient,
+    )
+
+    # --- Scale and encode pixel data ---
+    scale = max(summed_pixel_values) / 16384
+    ds.DoseGridScaling = scale
+    plan.logger.debug("Dose Grid Scaling: %s", scale)
+
+    if scale != 0:
+        pixel_values = [int(round(v / scale)) for v in summed_pixel_values]
+    else:
+        pixel_values = [0] * len(summed_pixel_values)
+
+    ds.PixelData = struct.pack("%sh" % len(pixel_values), *pixel_values)
+
+    # Flip dose grid for feet-first orientations
+    if patient_position in ("FFS", "FFP"):
+        arr = ds.pixel_array
+        ds.PixelData = np.flip(arr, axis=0).tostring()
+
+    ds.FrameIncrementPointer = ds.data_element("GridFrameOffsetVector").tag
+
+    # --- Save ---
+    output_file = os.path.join(export_path, rd_filename)
+    plan.logger.info("Creating Dose file: %s", output_file)
+    ds.save_as(output_file)
+
+
+def _sum_beam_doses(
+    plan, trial_info, ds, patient_position,
+    dim_x, dim_y, dim_z, voxel_mm, image_position_patient,
+):
+    """Sum the dose contributions from all beams in a trial.
+
+    Returns the summed pixel values list, already in the correct frame order
+    for DICOM.
     """
-
-    # Unpack dose origin
-    dose_origin_x, dose_origin_y, dose_origin_z = dose_origin
-
-    # Calculate trial-specific dose grid shifts
-    ydoseshift = (
-        trial_info["DoseGrid .VoxelSize .Y"] * 10 * trial_info["DoseGrid .Dimension .Y"]
-        - trial_info["DoseGrid .VoxelSize .Y"] * 10
-    )
-    zdoseshift = (
-        trial_info["DoseGrid .VoxelSize .Z"] * 10 * trial_info["DoseGrid .Dimension .Z"]
-        - trial_info["DoseGrid .VoxelSize .Z"] * 10
-    )
-
-    # Calculate ImagePositionPatient based on patient position and trial-specific shifts
-    if patient_position == "HFS":
-        image_position_patient = [
-            dose_origin_x,
-            dose_origin_y - ydoseshift,
-            dose_origin_z - zdoseshift,
-        ]
-    elif patient_position == "HFP":
-        image_position_patient = [
-            dose_origin_x,
-            dose_origin_y + ydoseshift,
-            dose_origin_z - zdoseshift,
-        ]
-    elif patient_position == "FFS":
-        image_position_patient = [
-            dose_origin_x,
-            dose_origin_y - ydoseshift,
-            dose_origin_z + zdoseshift,
-        ]
-    elif patient_position == "FFP":
-        image_position_patient = [
-            dose_origin_x,
-            dose_origin_y + ydoseshift,
-            dose_origin_z + zdoseshift,
-        ]
-
-    # Update trial-specific DICOM fields
+    vx, vy, vz = voxel_mm
+    origin = list(image_position_patient)
     trial_name = trial_info.get("Name", "Unknown")
 
-    # Update the SOP Instance UID for this trial
-    ds.SOPInstanceUID = doseInstanceUID
-    ds.file_meta.MediaStorageSOPInstanceUID = doseInstanceUID
-
-    # Update filename with trial name and UID
-    RDfilename = f"RD.{trial_name}.{doseInstanceUID}.dcm"
-    ds.filename = RDfilename
-
-    # Update trial-specific image position and grid parameters
-    ds.ImagePositionPatient = image_position_patient
-    ds.NumberOfFrames = int(trial_info["DoseGrid .Dimension .Z"])
-    ds.Rows = int(trial_info["DoseGrid .Dimension .Y"])
-    ds.Columns = int(trial_info["DoseGrid .Dimension .X"])
-    ds.PixelSpacing = [
-        trial_info["DoseGrid .VoxelSize .X"] * 10,
-        trial_info["DoseGrid .VoxelSize .Y"] * 10,
-    ]
-    ds.SliceThickness = trial_info["DoseGrid .VoxelSize .Z"] * 10
-
-    # Update trial-specific reference IDs
-    ds.SeriesInstanceUID = doseInstanceUID
-    ds.ReferencedRTPlanSequence[0].ReferencedSOPInstanceUID = planInstanceUID
-
-    # Update grid frame offset vector for this trial
-    grid_frame_offset_vector = []
-    for p in range(0, int(trial_info["DoseGrid .Dimension .Z"])):
-        grid_frame_offset_vector.append(
-            p * float(trial_info["DoseGrid .VoxelSize .Z"] * 10)
-        )
-    ds.GridFrameOffsetVector = grid_frame_offset_vector
-
-    # Array in which to sum the dose values of all beams
-    summed_pixel_values = []
-
-    # For each beam in the trial, convert the dose from the Pinnacle binary file and sum
     beam_list = trial_info["BeamList"] if trial_info["BeamList"] else []
-    if len(beam_list) == 0:
+    if not beam_list:
         plan.logger.warning(
             "No Beams found in Trial: %s. Unable to generate RTDOSE.", trial_name
         )
         raise MissingTrialBeamsError(f"No Beams found in Trial: {trial_name}")
 
+    summed_pixel_values = []
     empty_beam_count = 0
+
     for beam in beam_list:
         plan.logger.info("Exporting Dose for beam: %s", beam["Name"])
 
-        # Get the binary file for this beam
+        # --- Locate and validate binary dose file ---
         binary_id = re.findall("\\d+", beam["DoseVolume"])[0]
         filled_binary_id = str(binary_id).zfill(3)
         binary_file = os.path.join(plan.path, f"plan.Trial.binary.{filled_binary_id}")
 
-        # check whether the binary file is non-empty
         binary_data = read_binary_data(binary_file)
         if binary_data is False:
             plan.logger.warning(
@@ -397,66 +467,46 @@ def convert_dose_for_trial(
                 raise MissingBeamDoseError("All beams in plan are missing dose.")
             continue
 
-        # Get the prescription for this beam (need this for number of fractions)
+        # --- Prescription and scaling ---
         prescription = [
-            p
-            for p in trial_info["PrescriptionList"]
+            p for p in trial_info["PrescriptionList"]
             if p["Name"] == beam["PrescriptionName"]
         ][0]
 
-        # Get the prescription point
+        # Find the prescription point
         plan.logger.debug("PrescriptionPointName: %s", beam["PrescriptionPointName"])
-        points = plan.points
         prescription_point = []
-        for p in points:
+        for p in plan.points:
             if p["Name"] == beam["PrescriptionPointName"]:
                 plan.logger.debug(
                     "Presc Point: %s %s %s %s",
-                    p["Name"],
-                    p["XCoord"],
-                    p["YCoord"],
-                    p["ZCoord"],
+                    p["Name"], p["XCoord"], p["YCoord"], p["ZCoord"],
                 )
                 prescription_point = plan.convert_point(p)
                 break
 
         if len(prescription_point) < 3:
             plan.logger.warning(
-                "No valid prescription point found for beam! Beam will be ignored for "
-                "Dose conversion. Dose will most likely be incorrect"
+                "No valid prescription point found for beam! Beam will be ignored "
+                "for Dose conversion. Dose will most likely be incorrect"
             )
             continue
 
         plan.logger.debug("Presc Point Dicom: %s, %s", p["Name"], prescription_point)
+
+        num_fractions = prescription["NumberOfFractions"]
         total_prescription = (
-            beam["MonitorUnitInfo"]["PrescriptionDose"]
-            * prescription["NumberOfFractions"]
+            beam["MonitorUnitInfo"]["PrescriptionDose"] * num_fractions
         )
         plan.logger.debug("Total Prescription %s", total_prescription)
 
-        # Read the dose into a grid, so that we can interpolate for the prescription
-        # point and determine the MU for the grid
-        dose_grid = np.zeros(
-            (
-                trial_info["DoseGrid .Dimension .X"],
-                trial_info["DoseGrid .Dimension .Y"],
-                trial_info["DoseGrid .Dimension .Z"],
-            )
-        )
-        spacing = [
-            trial_info["DoseGrid .VoxelSize .X"] * 10,
-            trial_info["DoseGrid .VoxelSize .Y"] * 10,
-            trial_info["DoseGrid .VoxelSize .Z"] * 10,
-        ]
-        origin = [
-            ds.ImagePositionPatient[0],
-            ds.ImagePositionPatient[1],
-            ds.ImagePositionPatient[2],
-        ]
+        # --- Read dose grid and compute beam MU ---
+        dose_grid = np.zeros((dim_x, dim_y, dim_z))
         dose_grid = construct_dose_from_binary(binary_data, dose_grid)
 
-        # Get the index within that grid of the dose reference point
-        idx = [0.0, 0.0, 0.0]
+        spacing = [vx, vy, vz]
+
+        # Get the fractional index of the prescription point within the grid
         orientation_matrix = np.zeros((3, 3))
         orientation_matrix[0, :] = IMAGE_ORIENTATION_MAP[patient_position][:3]
         orientation_matrix[1, :] = IMAGE_ORIENTATION_MAP[patient_position][3:]
@@ -464,89 +514,45 @@ def convert_dose_for_trial(
             orientation_matrix[0, :], orientation_matrix[1, :]
         )
 
+        idx = [0.0, 0.0, 0.0]
         for i in range(3):
             idx[i] = -(origin[i] - prescription_point[i]) / spacing[i]
             idx[i] *= orientation_matrix[i, i]
 
         plan.logger.debug("Index of prescription point within grid: %s", idx)
 
-        # Trilinear interpolation of that point within the dose grid
         cgy_mu = trilinear_interpolation(idx, dose_grid)
         plan.logger.debug("cgy_mu: %s", cgy_mu)
 
-        # Now that we have the cgy/mu value of the dose reference point, we can
-        # extract an accurate value for MU
-        beam_mu = (total_prescription / cgy_mu) / prescription["NumberOfFractions"]
+        beam_mu = (total_prescription / cgy_mu) / num_fractions
         plan.logger.debug("Beam MU: %s", beam_mu)
 
+        # --- Convert dose grid to pixel values ---
         pixel_data_list = []
-        for z in range(trial_info["DoseGrid .Dimension .Z"] - 1, -1, -1):
-            for y in range(0, trial_info["DoseGrid .Dimension .Y"]):
-                for x in range(0, trial_info["DoseGrid .Dimension .X"]):
-                    value = (
-                        float(prescription["NumberOfFractions"])
-                        * dose_grid[x, y, z]
-                        * beam_mu
-                        / 100
-                    )
+        for z in range(dim_z - 1, -1, -1):
+            for y in range(dim_y):
+                for x in range(dim_x):
+                    value = num_fractions * dose_grid[x, y, z] * beam_mu / 100
                     pixel_data_list.append(value)
 
-        ds.FrameIncrementPointer = ds.data_element("GridFrameOffsetVector").tag
-
+        # Reorder into DICOM frame order
         main_pix_array = []
-        for h in range(0, trial_info["DoseGrid .Dimension .Z"]):
-            pixelsforframe = []
-            for k in range(
-                0,
-                trial_info["DoseGrid .Dimension .X"]
-                * trial_info["DoseGrid .Dimension .Y"],
-            ):
-                pixelsforframe.append(
-                    float(
-                        pixel_data_list[
-                            h
-                            * trial_info["DoseGrid .Dimension .Y"]
-                            * trial_info["DoseGrid .Dimension .X"]
-                            + k
-                        ]
-                    )
-                )
-
-            main_pix_array = main_pix_array + list(reversed(pixelsforframe))
+        pixels_per_frame = dim_x * dim_y
+        for h in range(dim_z):
+            frame_start = h * pixels_per_frame
+            frame_pixels = [
+                float(pixel_data_list[frame_start + k])
+                for k in range(pixels_per_frame)
+            ]
+            main_pix_array.extend(reversed(frame_pixels))
 
         main_pix_array = list(reversed(main_pix_array))
 
-        # Add the values from this beam to the summed values
-        if len(summed_pixel_values) == 0:
+        # Accumulate
+        if not summed_pixel_values:
             summed_pixel_values = main_pix_array
         else:
-            for i, values in enumerate(summed_pixel_values):
-                summed_pixel_values[i] = values + main_pix_array[i]
+            for i in range(len(summed_pixel_values)):
+                summed_pixel_values[i] += main_pix_array[i]
 
-    # Compute the scaling factor
-    scale = max(summed_pixel_values) / 16384
-    ds.DoseGridScaling = scale
-    plan.logger.debug("Dose Grid Scaling: %s", ds.DoseGridScaling)
-
-    # Scale by the scaling factor
-    pixelvaluelist = []
-    for _, element in enumerate(summed_pixel_values, 0):
-        if scale != 0:
-            element = round(element / scale)
-        else:
-            element = 0
-        pixelvaluelist.append(int(element))
-
-    # Set the PixelData
-    pixel_binary_block = struct.pack("%sh" % len(pixelvaluelist), *pixelvaluelist)
-    ds.PixelData = pixel_binary_block
-
-    # If Feet first, flip the dose grid
-    if patient_position in ("FFS", "FFP"):
-        arr = ds.pixel_array
-        ds.PixelData = np.flip(arr, axis=0).tostring()
-
-    # Save the RTDose Dicom File
-    output_file = os.path.join(export_path, RDfilename)
-    plan.logger.info("Creating Dose file: %s", output_file)
-    ds.save_as(output_file)
+    return summed_pixel_values
