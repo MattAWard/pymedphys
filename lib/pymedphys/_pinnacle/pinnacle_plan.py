@@ -89,6 +89,7 @@ class PinnaclePlan:
         self._plan_inst_uid = None  # UID for RTPlan instance
         self._dose_inst_uid = None  # UID for RTDose instance
         self._struct_inst_uid = None  # UID for RTStruct instance
+        self._trial_uid_cache = {}  # Cache: trial key → uid dict
 
         for image in pinnacle.images:
             if image.image["ImageSetID"] == self.plan_info["PrimaryCTImageSetID"]:
@@ -357,13 +358,20 @@ class PinnaclePlan:
         return False
 
     def generate_uids_for_trial(self, trial_info, uid_type="RANDOM"):
-        """Generate a fresh set of RTPLAN, RTDOSE and RTSTRUCT UIDs for a
-        specific trial.
+        """Generate (or retrieve cached) RTPLAN, RTDOSE and RTSTRUCT UIDs for
+        a specific trial.
 
         This is the canonical UID source for multi-trial export. It does NOT
         mutate ``self._plan_inst_uid`` / ``self._struct_inst_uid`` so it is
         safe to call repeatedly inside a loop over trials without UID values
         from one trial leaking into another.
+
+        Results are cached per trial (keyed by trial name + write timestamp)
+        so that ``convert_struct``, ``convert_plan`` and ``convert_dose`` all
+        receive the same UIDs when they independently call this method for the
+        same trial.  This ensures cross-references between RT objects remain
+        consistent.  Call ``clear_uid_cache()`` to force fresh UIDs on the
+        next call.
 
         Each call produces both SOP Instance UIDs and Series Instance UIDs.
         The Series UIDs are always random (never deterministic) because
@@ -400,6 +408,25 @@ class PinnaclePlan:
             Series Instance UIDs (always random).
         """
 
+        # Build a cache key from trial identity so that every caller
+        # (convert_struct, convert_plan, convert_dose) that asks for UIDs
+        # for the *same* trial gets back the *same* set.  Without this,
+        # each independent call generates fresh random UIDs and the
+        # cross-references between RT objects are broken.
+        cache_key = (
+            trial_info["Name"],
+            trial_info["ObjectVersion"]["WriteTimeStamp"],
+        )
+        if cache_key in self._trial_uid_cache:
+            self.logger.debug(
+                "Trial '%s' UIDs (cached) - plan: %s, dose: %s, struct: %s",
+                trial_info["Name"],
+                self._trial_uid_cache[cache_key]["plan"],
+                self._trial_uid_cache[cache_key]["dose"],
+                self._trial_uid_cache[cache_key]["struct"],
+            )
+            return self._trial_uid_cache[cache_key]
+
         entropy_srcs = None
         if uid_type == "HASH":
             entropy_srcs = [
@@ -431,7 +458,7 @@ class PinnaclePlan:
             trial_info["Name"], plan_uid, dose_uid, struct_uid,
         )
 
-        return {
+        uids = {
             "plan": plan_uid,
             "dose": dose_uid,
             "struct": struct_uid,
@@ -439,6 +466,16 @@ class PinnaclePlan:
             "series_dose": series_dose_uid,
             "series_struct": series_struct_uid,
         }
+        self._trial_uid_cache[cache_key] = uids
+        return uids
+
+    def clear_uid_cache(self):
+        """Discard all cached trial UIDs.
+
+        Call this before re-exporting the same plan if fresh UIDs are
+        required (e.g. when writing to a new output directory).
+        """
+        self._trial_uid_cache.clear()
 
     def generate_uids(self, uid_type="RANDOM"):
         """Generates UIDs for the *active* trial and caches them on the plan.
