@@ -455,7 +455,10 @@ class PinnaclePlan:
 
         self.logger.debug(
             "Trial '%s' UIDs - plan: %s, dose: %s, struct: %s",
-            trial_info["Name"], plan_uid, dose_uid, struct_uid,
+            trial_info["Name"],
+            plan_uid,
+            dose_uid,
+            struct_uid,
         )
 
         uids = {

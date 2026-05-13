@@ -68,6 +68,7 @@ from .constants import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _new_dataset():
     """Shorthand for creating a new empty DICOM Dataset."""
     return pydicom.dataset.Dataset()
@@ -158,26 +159,20 @@ def trilinear_interpolation(idx, grid):
     for x in range(2):
         for y in range(2):
             for z in range(2):
-                corners[x][y][z] = grid[
-                    int_idx[0] + x, int_idx[1] + y, int_idx[2] + z
-                ]
+                corners[x][y][z] = grid[int_idx[0] + x, int_idx[1] + y, int_idx[2] + z]
 
     # Interpolate along X
     interp_x = [[0.0] * 2 for _ in range(2)]
     for y in range(2):
         for z in range(2):
             interp_x[y][z] = (
-                corners[0][y][z] * (1 - frac_idx[0])
-                + corners[1][y][z] * frac_idx[0]
+                corners[0][y][z] * (1 - frac_idx[0]) + corners[1][y][z] * frac_idx[0]
             )
 
     # Interpolate along Y
     interp_xy = [0.0, 0.0]
     for z in range(2):
-        interp_xy[z] = (
-            interp_x[0][z] * (1 - frac_idx[1])
-            + interp_x[1][z] * frac_idx[1]
-        )
+        interp_xy[z] = interp_x[0][z] * (1 - frac_idx[1]) + interp_x[1][z] * frac_idx[1]
 
     # Interpolate along Z
     return interp_xy[0] * (1 - frac_idx[2]) + interp_xy[1] * frac_idx[2]
@@ -210,7 +205,9 @@ def _get_voxel_sizes_mm(trial_info):
     )
 
 
-def _compute_image_position_patient(dose_origin, voxel_mm, dimensions, patient_position):
+def _compute_image_position_patient(
+    dose_origin, voxel_mm, dimensions, patient_position
+):
     """Compute ImagePositionPatient for the dose grid.
 
     The dose origin from Pinnacle is at the grid centre. DICOM needs the
@@ -236,6 +233,7 @@ def _compute_image_position_patient(dose_origin, voxel_mm, dimensions, patient_p
 # ---------------------------------------------------------------------------
 # Top-level entry point
 # ---------------------------------------------------------------------------
+
 
 def convert_dose(plan, export_path):
     """Export RTDose files for all trials in the plan.
@@ -333,8 +331,15 @@ def convert_dose(plan, export_path):
 
         try:
             _convert_dose_for_trial(
-                plan, trial_info, dose_uid, plan_uid, series_uid,
-                dose_origin, patient_position, ds, export_path,
+                plan,
+                trial_info,
+                dose_uid,
+                plan_uid,
+                series_uid,
+                dose_origin,
+                patient_position,
+                ds,
+                export_path,
             )
         except (MissingTrialBeamsError, MissingBeamDoseError) as exc:
             plan.logger.warning(
@@ -347,9 +352,17 @@ def convert_dose(plan, export_path):
 # Per-trial dose conversion
 # ---------------------------------------------------------------------------
 
+
 def _convert_dose_for_trial(
-    plan, trial_info, dose_uid, plan_uid, series_uid,
-    dose_origin, patient_position, ds, export_path,
+    plan,
+    trial_info,
+    dose_uid,
+    plan_uid,
+    series_uid,
+    dose_origin,
+    patient_position,
+    ds,
+    export_path,
 ):
     """Convert dose for a specific trial and save the RTDOSE DICOM file."""
 
@@ -359,7 +372,10 @@ def _convert_dose_for_trial(
 
     # --- Compute ImagePositionPatient ---
     image_position_patient = _compute_image_position_patient(
-        dose_origin, (vx, vy, vz), (dim_x, dim_y, dim_z), patient_position,
+        dose_origin,
+        (vx, vy, vz),
+        (dim_x, dim_y, dim_z),
+        patient_position,
     )
 
     # --- Update trial-specific DICOM fields ---
@@ -394,8 +410,15 @@ def _convert_dose_for_trial(
 
     # --- Sum beam doses ---
     summed_pixel_values = _sum_beam_doses(
-        plan, trial_info, ds, patient_position, dim_x, dim_y, dim_z,
-        (vx, vy, vz), image_position_patient,
+        plan,
+        trial_info,
+        ds,
+        patient_position,
+        dim_x,
+        dim_y,
+        dim_z,
+        (vx, vy, vz),
+        image_position_patient,
     )
 
     # --- Scale and encode pixel data ---
@@ -424,8 +447,15 @@ def _convert_dose_for_trial(
 
 
 def _sum_beam_doses(
-    plan, trial_info, ds, patient_position,
-    dim_x, dim_y, dim_z, voxel_mm, image_position_patient,
+    plan,
+    trial_info,
+    ds,
+    patient_position,
+    dim_x,
+    dim_y,
+    dim_z,
+    voxel_mm,
+    image_position_patient,
 ):
     """Sum the dose contributions from all beams in a trial.
 
@@ -469,7 +499,8 @@ def _sum_beam_doses(
 
         # --- Prescription and scaling ---
         prescription = [
-            p for p in trial_info["PrescriptionList"]
+            p
+            for p in trial_info["PrescriptionList"]
             if p["Name"] == beam["PrescriptionName"]
         ][0]
 
@@ -480,7 +511,10 @@ def _sum_beam_doses(
             if p["Name"] == beam["PrescriptionPointName"]:
                 plan.logger.debug(
                     "Presc Point: %s %s %s %s",
-                    p["Name"], p["XCoord"], p["YCoord"], p["ZCoord"],
+                    p["Name"],
+                    p["XCoord"],
+                    p["YCoord"],
+                    p["ZCoord"],
                 )
                 prescription_point = plan.convert_point(p)
                 break
@@ -495,9 +529,7 @@ def _sum_beam_doses(
         plan.logger.debug("Presc Point Dicom: %s, %s", p["Name"], prescription_point)
 
         num_fractions = prescription["NumberOfFractions"]
-        total_prescription = (
-            beam["MonitorUnitInfo"]["PrescriptionDose"] * num_fractions
-        )
+        total_prescription = beam["MonitorUnitInfo"]["PrescriptionDose"] * num_fractions
         plan.logger.debug("Total Prescription %s", total_prescription)
 
         # --- Read dose grid and compute beam MU ---
@@ -541,8 +573,7 @@ def _sum_beam_doses(
         for h in range(dim_z):
             frame_start = h * pixels_per_frame
             frame_pixels = [
-                float(pixel_data_list[frame_start + k])
-                for k in range(pixels_per_frame)
+                float(pixel_data_list[frame_start + k]) for k in range(pixels_per_frame)
             ]
             main_pix_array.extend(reversed(frame_pixels))
 
