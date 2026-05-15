@@ -123,7 +123,7 @@ def format_lock_summary(lock_info):
     return f"locked: {raw}"
 
 
-def _resolve_lock_status(plan):
+def resolve_lock_status(plan):
     """Locate ``PlanLockStatus`` for a given :class:`PinnaclePlan`.
 
     Pinnacle stores the lock/approval audit string in the per-plan
@@ -293,7 +293,7 @@ def is_clinical_trial_for_plan(plan, trial_info):
     with just the resolved lock string and dispatches to the dict-based
     :func:`is_clinical_trial`.
     """
-    synthetic_plan_info = {"PlanLockStatus": _resolve_lock_status(plan)}
+    synthetic_plan_info = {"PlanLockStatus": resolve_lock_status(plan)}
     return is_clinical_trial(synthetic_plan_info, trial_info, len(plan.trials))
 
 
@@ -304,7 +304,7 @@ def classify_trial_for_plan(plan, trial_info):
 
 def build_pinnacle_metadata_suffix_for_plan(plan, trial_info):
     """:func:`build_pinnacle_metadata_suffix` with automatic lookup."""
-    synthetic_plan_info = {"PlanLockStatus": _resolve_lock_status(plan)}
+    synthetic_plan_info = {"PlanLockStatus": resolve_lock_status(plan)}
     return build_pinnacle_metadata_suffix(
         synthetic_plan_info, trial_info, len(plan.trials)
     )

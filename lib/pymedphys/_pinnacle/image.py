@@ -113,15 +113,17 @@ def create_image_files(image, export_path):
         ds.SeriesDate = dateofscan
         ds.AcquisitionDate = dateofscan
         ds.ContentDate = dateofscan
+        ds.StudyTime = timeofscan
         ds.AcquisitionTime = timeofscan
         ds.Modality = modality
         # This should come from Manufacturer in header, but for some
         # patients it isn't set??
         ds.Manufacturer = ""
         ds.StationName = modality
-        ds.PatientsName = patient_info["FullName"]
+        ds.PatientName = patient_info["FullName"]
         ds.PatientID = patient_info["MedicalRecordNumber"]
-        ds.PatientsBirthDate = patient_info["DOB"]
+        ds.PatientBirthDate = patient_info["DOB"]
+        ds.PatientSex = patient_info.get("Gender", [""])[0] if patient_info.get("Gender") else ""
         ds.BitsAllocated = 16
         ds.BitsStored = 16
         ds.HighBit = 15
@@ -201,13 +203,24 @@ def convert_image(image, export_path):
         create_image_files(image, export_path)
         return
 
+    patient_info = image.pinnacle.patient_info
+    image_set = image.image_set
+
     for file in os.listdir(dicom_directory):
         # try:
         imageds = pydicom.dcmread(os.path.join(dicom_directory, file), force=True)
 
-        imageds.PatientName = image.pinnacle.patient_info["FullName"]
-        imageds.PatientID = image.pinnacle.patient_info["MedicalRecordNumber"]
-        imageds.PatientBirthDate = image.pinnacle.patient_info["DOB"]
+        imageds.PatientName = patient_info["FullName"]
+        imageds.PatientID = patient_info["MedicalRecordNumber"]
+        imageds.PatientBirthDate = patient_info["DOB"]
+        imageds.PatientSex = patient_info.get("Gender", [""])[0] if patient_info.get("Gender") else ""
+
+        # Ensure required attributes are present — existing DICOM from
+        # the Pinnacle archive may be missing these
+        if "StudyTime" not in imageds and image_set:
+            imageds.StudyTime = image_set["scan_time"]
+        if "SpecificCharacterSet" not in imageds:
+            imageds.SpecificCharacterSet = "ISO_IR 100"
 
         if "SOPInstanceUID" not in imageds:
             image.logger.warn("Unable to process image: %s", file)
