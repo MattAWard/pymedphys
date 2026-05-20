@@ -148,14 +148,26 @@ class PinnaclePlan:
 
         Returns
         -------
-        machine_info : dict
-            Machine info read from 'plan.Pinnacle.Machines' file.
+        machine_info : dict or None
+            Machine info read from 'plan.Pinnacle.Machines' file,
+            or None if the file is missing or unparseable.
         """
 
         if not self._machine_info:
             path_machine = os.path.join(self._path, "plan.Pinnacle.Machines")
+            if not os.path.exists(path_machine):
+                self.logger.warning(
+                    "plan.Pinnacle.Machines not found at: %s", path_machine
+                )
+                return None
             self.logger.debug("Reading machine data from: %s", path_machine)
-            self._machine_info = pinn_to_dict(path_machine)
+            try:
+                self._machine_info = pinn_to_dict(path_machine)
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to parse plan.Pinnacle.Machines: %s", exc
+                )
+                return None
 
         return self._machine_info
 
@@ -167,12 +179,30 @@ class PinnaclePlan:
         -------
         trials : list
             List of all trials found within this plan.
+            Returns an empty list if the file is missing or unparseable.
         """
 
         if not self._trials:
             path_trial = os.path.join(self._path, "plan.Trial")
+            if not os.path.exists(path_trial):
+                self.logger.warning(
+                    "plan.Trial not found at: %s — no trials available",
+                    path_trial,
+                )
+                self._trials = []
+                return self._trials
+
             self.logger.debug("Reading trial data from: %s", path_trial)
-            self._trials = pinn_to_dict(path_trial)
+            try:
+                self._trials = pinn_to_dict(path_trial)
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to parse plan.Trial at %s: %s — no trials available",
+                    path_trial, exc,
+                )
+                self._trials = []
+                return self._trials
+
             if isinstance(self._trials, dict):
                 self._trials = [
                     self._trials["Trial"]
@@ -272,12 +302,29 @@ class PinnaclePlan:
         -------
         points : list
             List of points read from the 'plan.Points' file.
+            Returns an empty list if the file is missing.
         """
 
         if not self._points:
             path_points = os.path.join(self._path, "plan.Points")
+            if not os.path.exists(path_points):
+                self.logger.warning(
+                    "plan.Points not found at: %s — using empty points list",
+                    path_points,
+                )
+                self._points = []
+                return self._points
+
             self.logger.debug("Reading points data from: %s", path_points)
-            self._points = pinn_to_dict(path_points)
+            try:
+                self._points = pinn_to_dict(path_points)
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to parse plan.Points at %s: %s — using empty points list",
+                    path_points, exc,
+                )
+                self._points = []
+                return self._points
 
             if isinstance(self._points, dict):
                 self._points = [self._points["Poi"]]
@@ -289,38 +336,69 @@ class PinnaclePlan:
 
     @property
     def patient_position(self):
-        """Gets the patient position
+        """Gets the patient position.
+
+        Reads from ``plan.PatientSetup`` if available.  When that file is
+        missing (common in older archives or partial exports), falls back
+        to the ``patient_position`` key in the primary image header.
+        Returns an empty string only if neither source is available.
 
         Returns
         -------
         patient_position : str
-            The patient position for this plan.
+            The patient position for this plan (e.g. 'HFS', 'FFS').
         """
 
         if not self._patient_setup:
-            self._patient_setup = pinn_to_dict(
-                os.path.join(self._path, "plan.PatientSetup")
-            )
+            setup_path = os.path.join(self._path, "plan.PatientSetup")
+            if os.path.exists(setup_path):
+                try:
+                    self._patient_setup = pinn_to_dict(setup_path)
+                except Exception as exc:
+                    self.logger.warning(
+                        "Failed to parse plan.PatientSetup at %s: %s",
+                        setup_path, exc,
+                    )
+                    self._patient_setup = None
+
+            # Fallback: derive from the primary image header
+            if not self._patient_setup:
+                if self._primary_image and self._primary_image.image_header:
+                    pos = self._primary_image.image_header.get("patient_position", "")
+                    if pos:
+                        self.logger.info(
+                            "plan.PatientSetup missing — using image header "
+                            "patient_position: %s", pos,
+                        )
+                        return pos
+                self.logger.warning(
+                    "plan.PatientSetup missing and no image header fallback "
+                    "available — patient position unknown"
+                )
+                return ""
 
         pat_pos = ""
 
-        if "Head First" in self._patient_setup["Orientation"]:
+        orientation = self._patient_setup.get("Orientation", "")
+        position = self._patient_setup.get("Position", "")
+
+        if "Head First" in orientation:
             pat_pos = "HF"
-        elif "Feet First" in self._patient_setup["Orientation"]:
+        elif "Feet First" in orientation:
             pat_pos = "FF"
 
-        if "supine" in self._patient_setup["Position"]:
+        if "supine" in position:
             pat_pos = f"{pat_pos}S"
-        elif "prone" in self._patient_setup["Position"]:
+        elif "prone" in position:
             pat_pos = f"{pat_pos}P"
         elif (
-            "decubitus right" in self._patient_setup["Position"]
-            or "Decuibitus Right" in self._patient_setup["Position"]
+            "decubitus right" in position
+            or "Decuibitus Right" in position
         ):
             pat_pos = f"{pat_pos}DR"
         elif (
-            "decubitus left" in self._patient_setup["Position"]
-            or "Decuibitus Left" in self._patient_setup["Position"]
+            "decubitus left" in position
+            or "Decuibitus Left" in position
         ):
             pat_pos = f"{pat_pos}DL"
 

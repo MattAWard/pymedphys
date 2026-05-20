@@ -90,12 +90,18 @@ _DOSE_ORIGIN_SIGNS = {
 # Image position patient shift directions.
 # Keys: patient_position → (y_shift_sign, z_shift_sign)
 # y_shift_sign: +1 means add ydoseshift, -1 means subtract
-# z_shift_sign: +1 means add zdoseshift, -1 means subtract
+# z_shift_sign: applied to the z shift from origin to grid edge.
+#
+# For head-first orientations the dose origin (after sign conversion)
+# lands at the *far* z-edge of the grid, so we shift by -z_shift to
+# reach the IPP (near edge where GFOV = 0).
+# For feet-first orientations the sign conversion already places the
+# origin at the IPP edge, so no z-shift is needed.
 _IMAGE_POSITION_SHIFTS = {
     "HFS": (-1, -1),
     "HFP": (+1, -1),
-    "FFS": (-1, +1),
-    "FFP": (+1, +1),
+    "FFS": (-1, 0),
+    "FFP": (+1, 0),
 }
 
 _SUPPORTED_ORIENTATIONS = ("HFS", "HFP", "FFS", "FFP")
@@ -213,9 +219,14 @@ def _get_voxel_sizes_mm(trial_info):
 def _compute_image_position_patient(dose_origin, voxel_mm, dimensions, patient_position):
     """Compute ImagePositionPatient for the dose grid.
 
-    The dose origin from Pinnacle is at the grid centre. DICOM needs the
-    corner position, so we shift by (n - 1) * voxel_size along Y and Z
-    depending on the patient orientation.
+    The dose origin from Pinnacle, after sign conversion, sits at a
+    specific corner of the dose grid.  DICOM needs the corner where
+    GridFrameOffsetVector = 0 (the ImagePositionPatient).
+
+    For head-first orientations the sign conversion places the origin at
+    the far z-edge, so we shift by -(dim-1)*vz to reach the IPP corner.
+    For feet-first orientations the origin is already at the IPP corner,
+    so no z-shift is applied.
     """
     vx, vy, vz = voxel_mm
     dim_x, dim_y, dim_z = dimensions
@@ -283,7 +294,7 @@ def convert_dose(plan, export_path):
     ds.PatientName = patient_info["FullName"]
     ds.PatientBirthDate = patient_info["DOB"]
     ds.PatientID = patient_info["MedicalRecordNumber"]
-    ds.PatientSex = patient_info["Gender"][0]
+    ds.PatientSex = patient_info.get("Gender", "")[:1]
 
     ds.StudyInstanceUID = image_info["StudyInstanceUID"]
     ds.FrameOfReferenceUID = image_info["FrameUID"]
@@ -389,8 +400,14 @@ def _convert_dose_for_trial(
 
     ds.ReferencedRTPlanSequence[0].ReferencedSOPInstanceUID = plan_uid
 
-    # Grid frame offset vector
-    ds.GridFrameOffsetVector = [p * vz for p in range(dim_z)]
+    # Grid frame offset vector — direction depends on orientation.
+    # For head-first the frame normal is +z, so offsets are positive.
+    # For feet-first the frame normal is -z, so offsets are negative
+    # (frames still march from lower to higher z in patient coords).
+    if patient_position in ("FFS", "FFP"):
+        ds.GridFrameOffsetVector = [-p * vz for p in range(dim_z)]
+    else:
+        ds.GridFrameOffsetVector = [p * vz for p in range(dim_z)]
 
     # --- Sum beam doses ---
     summed_pixel_values = _sum_beam_doses(
@@ -408,12 +425,23 @@ def _convert_dose_for_trial(
     else:
         pixel_values = [0] * len(summed_pixel_values)
 
-    ds.PixelData = struct.pack("%sh" % len(pixel_values), *pixel_values)
-
-    # Flip dose grid for feet-first orientations
+    # --- Reverse frame order for feet-first orientations ---
+    # _sum_beam_doses always outputs frames in ascending Pinnacle z-index
+    # order (z=0 first = lowest Pinnacle z).  For HFS, Pinnacle's own RTDOSE
+    # exporter uses this same ordering, so viewers see correct results.
+    # For FFS/FFP, Pinnacle reverses the frame order so that frame 0
+    # corresponds to the IPP position (highest DICOM z, where GFOV=0).
+    # Without this reversal the dose volume appears z-flipped.
     if patient_position in ("FFS", "FFP"):
-        arr = ds.pixel_array
-        ds.PixelData = np.flip(arr, axis=0).tostring()
+        pixels_per_frame = dim_x * dim_y
+        frames = [
+            pixel_values[i * pixels_per_frame : (i + 1) * pixels_per_frame]
+            for i in range(dim_z)
+        ]
+        frames.reverse()
+        pixel_values = [v for frame in frames for v in frame]
+
+    ds.PixelData = struct.pack("%sh" % len(pixel_values), *pixel_values)
 
     ds.FrameIncrementPointer = ds.data_element("GridFrameOffsetVector").tag
 

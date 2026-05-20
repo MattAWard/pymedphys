@@ -127,28 +127,47 @@ class PinnacleExport:
             self.logger.debug("Reading patient data from: %s", path_patient)
             self._patient_info = pinn_to_dict(path_patient)
 
-            # Set the full patient name
-            last_name = self._patient_info["LastName"]
-            first_name = self._patient_info["FirstName"]
-            middle_name = self._patient_info["MiddleName"]
+            # Set the full patient name — use .get() for fields that may
+            # be absent in older archives.
+            last_name = self._patient_info.get("LastName", "")
+            first_name = self._patient_info.get("FirstName", "")
+            middle_name = self._patient_info.get("MiddleName", "")
             self._patient_info["FullName"] = f"{last_name}^{first_name}^{middle_name}^"
 
-            # gets birthday string with numbers and dashes
-            dobstr = self._patient_info["DateOfBirth"]
-            if "-" in dobstr:
-                dob_list = dobstr.split("-")
-            elif "/" in dobstr:
-                dob_list = dobstr.split("/")
-            else:
-                dob_list = dobstr.split(" ")
+            # Parse date of birth into DICOM format (YYYYMMDD).
+            # Pinnacle stores DOB in various locale-dependent formats:
+            #   YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY, DD MM YYYY, etc.
+            # Use datetime.strptime with multiple patterns for robust parsing.
+            from datetime import datetime as _dt
 
+            dobstr = self._patient_info.get("DateOfBirth", "")
             dob = ""
-            for num in dob_list:
-                if len(num) == 1:
-                    num = f"0{num}"
-                dob = f"{dob}{num}"
+            if dobstr:
+                for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d %m %Y",
+                            "%Y%m%d"):
+                    try:
+                        dob = _dt.strptime(dobstr.strip(), fmt).strftime("%Y%m%d")
+                        break
+                    except ValueError:
+                        continue
+
+                if not dob:
+                    # Fallback: strip non-digits and hope for the best
+                    import re as _re
+                    digits = _re.sub(r"\D", "", dobstr)
+                    if len(digits) == 8:
+                        dob = digits
+                    else:
+                        self.logger.warning(
+                            "Could not parse DateOfBirth '%s' — leaving empty",
+                            dobstr,
+                        )
 
             self._patient_info["DOB"] = dob
+
+            # Ensure Gender is always present (downstream modules index [0])
+            if "Gender" not in self._patient_info:
+                self._patient_info["Gender"] = ""
 
         return self._patient_info
 
