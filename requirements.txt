@@ -357,7 +357,7 @@ toml==0.10.2
     #   streamlit
 tomli==2.4.1 ; python_full_version < '3.11'
     # via sphinx
-tomlkit==0.14.0
+tomlkit==0.15.0
     # via pymedphys
 tornado==6.5.5
     # via streamlit
