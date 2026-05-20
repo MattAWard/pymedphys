@@ -63,6 +63,7 @@ from .pinnacle_metadata import append_pinnacle_metadata_for_plan
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _new_dataset():
     """Shorthand for creating a new empty DICOM Dataset."""
     return pydicom.dataset.Dataset()
@@ -173,9 +174,7 @@ def _parse_wedge_info(cp_data, plan_logger):
             "WedgeTopToBottom": ("OUT", "180"),
             "WedgeBottomToTop": ("IN", "0"),
         }
-        label, dicom_orientation = orientation_to_label.get(
-            orientation_raw, ("", "0")
-        )
+        label, dicom_orientation = orientation_to_label.get(orientation_raw, ("", "0"))
         info["name"] = f"W{angle_int}{label}{number_suffix}"
         info["orientation"] = dicom_orientation  # TODO: confirm orientation values
         plan_logger.debug("Standard wedge name = %s", info["name"])
@@ -273,10 +272,24 @@ def _create_wedge_sequence(wedge_info):
     return seq
 
 
-def _populate_first_control_point(cp, beam_ds, beam, plan, beam_energy, doserate,
-                                  gantryangle, colangle, psupportangle,
-                                  gantryrotdir, numwedges,
-                                  x1, x2, y1, y2, leafpositions):
+def _populate_first_control_point(
+    cp,
+    beam_ds,
+    beam,
+    plan,
+    beam_energy,
+    doserate,
+    gantryangle,
+    colangle,
+    psupportangle,
+    gantryrotdir,
+    numwedges,
+    x1,
+    x2,
+    y1,
+    y2,
+    leafpositions,
+):
     """Populate all attributes required by DICOM for the first control point.
 
     Per DICOM C.8.8.14.5: at the first control point, ALL applicable
@@ -333,6 +346,7 @@ def _populate_first_control_point(cp, beam_ds, beam, plan, beam_energy, doserate
 # Top-level entry point
 # ---------------------------------------------------------------------------
 
+
 def convert_plan(plan, export_path):
     """Export RTPLAN files for every trial in the plan.
 
@@ -376,6 +390,7 @@ def convert_plan(plan, export_path):
 # ---------------------------------------------------------------------------
 # Per-trial RTPLAN generation
 # ---------------------------------------------------------------------------
+
 
 def convert_plan_for_trial(
     plan,
@@ -440,7 +455,10 @@ def convert_plan_for_trial(
     ds.RTPlanLabel = f"{plan_info['PlanName']}.0"
     ds.RTPlanName = plan_info["PlanName"]
     ds.RTPlanDescription = append_pinnacle_metadata_for_plan(
-        None, plan, trial_info, max_length=1024,
+        None,
+        plan,
+        trial_info,
+        max_length=1024,
     )
     ds.RTPlanDate = ds.StudyDate
     ds.RTPlanTime = ds.StudyTime
@@ -592,7 +610,8 @@ def convert_plan_for_trial(
 
         # --- Prescription and energy ---
         prescription = [
-            p for p in trial_info["PrescriptionList"]
+            p
+            for p in trial_info["PrescriptionList"]
             if p["Name"] == beam["PrescriptionName"]
         ][0]
 
@@ -648,17 +667,47 @@ def convert_plan_for_trial(
 
         if is_step_and_shoot:
             _build_step_and_shoot_control_points(
-                beam_ds, beam, plan, numctrlpts, metersetweight,
-                beam_energy, doserate, gantryangle, colangle, psupportangle,
-                gantryrotdir, numwedges, wedge_info,
-                x1, x2, y1, y2, leafpositions, p_count,
+                beam_ds,
+                beam,
+                plan,
+                numctrlpts,
+                metersetweight,
+                beam_energy,
+                doserate,
+                gantryangle,
+                colangle,
+                psupportangle,
+                gantryrotdir,
+                numwedges,
+                wedge_info,
+                x1,
+                x2,
+                y1,
+                y2,
+                leafpositions,
+                p_count,
             )
         else:
             _build_non_ss_control_points(
-                beam_ds, beam, plan, numctrlpts, metersetweight,
-                beam_energy, doserate, gantryangle, colangle, psupportangle,
-                gantryrotdir, numwedges, wedge_info,
-                x1, x2, y1, y2, leafpositions, p_count,
+                beam_ds,
+                beam,
+                plan,
+                numctrlpts,
+                metersetweight,
+                beam_energy,
+                doserate,
+                gantryangle,
+                colangle,
+                psupportangle,
+                gantryrotdir,
+                numwedges,
+                wedge_info,
+                x1,
+                x2,
+                y1,
+                y2,
+                leafpositions,
+                p_count,
             )
 
         num_fractions = prescription["NumberOfFractions"]
@@ -680,11 +729,27 @@ def convert_plan_for_trial(
 # Step & Shoot control point builder
 # ---------------------------------------------------------------------------
 
+
 def _build_step_and_shoot_control_points(
-    beam_ds, beam, plan, numctrlpts, metersetweight,
-    beam_energy, doserate, gantryangle, colangle, psupportangle,
-    gantryrotdir, numwedges, wedge_info,
-    x1, x2, y1, y2, leafpositions, p_count,
+    beam_ds,
+    beam,
+    plan,
+    numctrlpts,
+    metersetweight,
+    beam_energy,
+    doserate,
+    gantryangle,
+    colangle,
+    psupportangle,
+    gantryrotdir,
+    numwedges,
+    wedge_info,
+    x1,
+    x2,
+    y1,
+    y2,
+    leafpositions,
+    p_count,
 ):
     """Build control points for a Step & Shoot beam."""
     plan.logger.debug("Using Step & Shoot")
@@ -721,9 +786,22 @@ def _build_step_and_shoot_control_points(
         if j == 0:
             # First control point: all attributes must be present (DICOM C.8.8.14.5)
             _populate_first_control_point(
-                cp, beam_ds, beam, plan, beam_energy, doserate,
-                gantryangle, colangle, psupportangle, gantryrotdir, numwedges,
-                x1, x2, y1, y2, leafpositions,
+                cp,
+                beam_ds,
+                beam,
+                plan,
+                beam_energy,
+                doserate,
+                gantryangle,
+                colangle,
+                psupportangle,
+                gantryrotdir,
+                numwedges,
+                x1,
+                x2,
+                y1,
+                y2,
+                leafpositions,
             )
         else:
             # Subsequent control points: only MLC changes
@@ -739,11 +817,27 @@ def _build_step_and_shoot_control_points(
 # Non-Step-and-Shoot (conformal arc / dynamic) control point builder
 # ---------------------------------------------------------------------------
 
+
 def _build_non_ss_control_points(
-    beam_ds, beam, plan, numctrlpts, metersetweight,
-    beam_energy, doserate, gantryangle, colangle, psupportangle,
-    gantryrotdir, numwedges, wedge_info,
-    x1, x2, y1, y2, leafpositions, p_count,
+    beam_ds,
+    beam,
+    plan,
+    numctrlpts,
+    metersetweight,
+    beam_energy,
+    doserate,
+    gantryangle,
+    colangle,
+    psupportangle,
+    gantryrotdir,
+    numwedges,
+    wedge_info,
+    x1,
+    x2,
+    y1,
+    y2,
+    leafpositions,
+    p_count,
 ):
     """Build control points for a non-Step-and-Shoot beam (e.g. conformal arc)."""
     plan.logger.debug("Not using Step & Shoot")
@@ -774,9 +868,22 @@ def _build_non_ss_control_points(
             dose_ref.ReferencedDoseReferenceNumber = "1"
 
             _populate_first_control_point(
-                cp, beam_ds, beam, plan, beam_energy, doserate,
-                gantryangle, colangle, psupportangle, gantryrotdir, numwedges,
-                x1, x2, y1, y2, leafpositions,
+                cp,
+                beam_ds,
+                beam,
+                plan,
+                beam_energy,
+                doserate,
+                gantryangle,
+                colangle,
+                psupportangle,
+                gantryrotdir,
+                numwedges,
+                x1,
+                x2,
+                y1,
+                y2,
+                leafpositions,
             )
         else:
             # Subsequent control points: only MLC

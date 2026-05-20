@@ -26,5 +26,5 @@ from .pinnacle_metadata import (
     is_clinical_trial,
     is_clinical_trial_for_plan,
     parse_lock_status,
-    resolve_lock_status
+    resolve_lock_status,
 )

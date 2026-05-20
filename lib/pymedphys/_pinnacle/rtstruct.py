@@ -61,6 +61,7 @@ from .constants import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _new_dataset():
     """Shorthand for creating a new empty DICOM Dataset."""
     return pydicom.dataset.Dataset()
@@ -150,6 +151,7 @@ def _transform_point_for_position(curr_points, patient_position):
 # Isocenter detection
 # ---------------------------------------------------------------------------
 
+
 def find_iso_center(plan):
     """Determine the isocenter, CT centre and dose reference point for the plan.
 
@@ -223,6 +225,7 @@ def find_iso_center(plan):
 # Points → DICOM
 # ---------------------------------------------------------------------------
 
+
 def read_points(ds, plan):
     """Read plan points (POIs) and add them to the DICOM dataset.
 
@@ -280,6 +283,7 @@ def read_points(ds, plan):
 # ---------------------------------------------------------------------------
 # ROI contours → DICOM (line-by-line parser for plan.roi)
 # ---------------------------------------------------------------------------
+
 
 def read_roi(ds, plan, skip_pattern):
     """Read ROI contours from the plan.roi file and add to the DICOM dataset.
@@ -436,9 +440,9 @@ def read_roi(ds, plan, skip_pattern):
             # ----- Number of points in current curve -----
             if "num_points =" in line:
                 npts = re.findall(r"[-+]?\d*\.\d+|\d+", line)[0]
-                contour_item = ds.ROIContourSequence[plan.roi_count - 1].ContourSequence[
-                    int(curvenum) - 1
-                ]
+                contour_item = ds.ROIContourSequence[
+                    plan.roi_count - 1
+                ].ContourSequence[int(curvenum) - 1]
                 contour_item.ContourGeometricType = "CLOSED_PLANAR"
                 contour_item.NumberOfContourPoints = npts
 
@@ -453,6 +457,7 @@ def read_roi(ds, plan, skip_pattern):
 # ---------------------------------------------------------------------------
 # Top-level entry points
 # ---------------------------------------------------------------------------
+
 
 def convert_struct(plan, export_path, skip_pattern):
     """Export RTSTRUCT files for every trial in the plan.
@@ -486,7 +491,12 @@ def convert_struct(plan, export_path, skip_pattern):
 
 
 def convert_struct_for_trial(
-    plan, trial_info, struct_instance_uid, series_instance_uid, export_path, skip_pattern
+    plan,
+    trial_info,
+    struct_instance_uid,
+    series_instance_uid,
+    export_path,
+    skip_pattern,
 ):
     """Write a single RTSTRUCT DICOM file for one specific trial."""
 

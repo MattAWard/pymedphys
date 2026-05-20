@@ -214,7 +214,11 @@ def classify_trial(plan_info, trial_info, total_trials):
     a reference/QA trial when in fact we just can't confirm it's
     clinical.
     """
-    return "clinical" if is_clinical_trial(plan_info, trial_info, total_trials) else "unknown"
+    return (
+        "clinical"
+        if is_clinical_trial(plan_info, trial_info, total_trials)
+        else "unknown"
+    )
 
 
 def build_pinnacle_metadata_suffix(plan_info, trial_info, total_trials):
@@ -245,8 +249,9 @@ def build_pinnacle_metadata_suffix(plan_info, trial_info, total_trials):
     return f"Pinnacle: {lock_summary}; {classification}"
 
 
-def append_pinnacle_metadata(existing_description, plan_info, trial_info, total_trials,
-                             max_length=_DICOM_ST_MAX):
+def append_pinnacle_metadata(
+    existing_description, plan_info, trial_info, total_trials, max_length=_DICOM_ST_MAX
+):
     """Append the Pinnacle metadata suffix to an existing description.
 
     Preserves whatever the description already held (typically the patient
@@ -310,8 +315,9 @@ def build_pinnacle_metadata_suffix_for_plan(plan, trial_info):
     )
 
 
-def append_pinnacle_metadata_for_plan(existing_description, plan, trial_info,
-                                      max_length=_DICOM_ST_MAX):
+def append_pinnacle_metadata_for_plan(
+    existing_description, plan, trial_info, max_length=_DICOM_ST_MAX
+):
     """:func:`append_pinnacle_metadata` with automatic lookup."""
     suffix = build_pinnacle_metadata_suffix_for_plan(plan, trial_info)
     base = (existing_description or "").strip()

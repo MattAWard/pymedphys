@@ -123,7 +123,9 @@ def create_image_files(image, export_path):
         ds.PatientName = patient_info["FullName"]
         ds.PatientID = patient_info["MedicalRecordNumber"]
         ds.PatientBirthDate = patient_info["DOB"]
-        ds.PatientSex = patient_info.get("Gender", [""])[0] if patient_info.get("Gender") else ""
+        ds.PatientSex = (
+            patient_info.get("Gender", [""])[0] if patient_info.get("Gender") else ""
+        )
         ds.BitsAllocated = 16
         ds.BitsStored = 16
         ds.HighBit = 15
@@ -213,7 +215,9 @@ def convert_image(image, export_path):
         imageds.PatientName = patient_info["FullName"]
         imageds.PatientID = patient_info["MedicalRecordNumber"]
         imageds.PatientBirthDate = patient_info["DOB"]
-        imageds.PatientSex = patient_info.get("Gender", [""])[0] if patient_info.get("Gender") else ""
+        imageds.PatientSex = (
+            patient_info.get("Gender", [""])[0] if patient_info.get("Gender") else ""
+        )
 
         # Ensure required attributes are present — existing DICOM from
         # the Pinnacle archive may be missing these
