@@ -315,6 +315,9 @@ def convert_dose(plan, export_path):
     ds.DoseUnits = "GY"
     ds.DoseType = "PHYSICAL"
     ds.DoseSummationType = "PLAN"
+
+    # TissueHeterogeneityCorrection: set per-trial below based on whether
+    # the trial uses ROI density overrides.  Default to IMAGE.
     ds.TissueHeterogeneityCorrection = "IMAGE"
 
     # Referenced RT Plan (placeholder — updated per trial)
@@ -341,6 +344,23 @@ def convert_dose(plan, export_path):
             y_sign * _get_dose_grid_value(trial_info, "Y", "Origin") * 10,
             z_sign * _get_dose_grid_value(trial_info, "Z", "Origin") * 10,
         ]
+
+        # Determine TissueHeterogeneityCorrection for this trial.
+        # If the trial has any ROI density overrides, use IMAGE\ROI_OVERRIDE.
+        roi_overrides = trial_info.get("ROIOverrideList", None)
+        has_roi_override = False
+        if roi_overrides:
+            # ROIOverrideList may be a list of overrides; check if any
+            # have a non-default density override set.
+            if isinstance(roi_overrides, list):
+                has_roi_override = len(roi_overrides) > 0
+            elif isinstance(roi_overrides, dict):
+                has_roi_override = True
+
+        if has_roi_override:
+            ds.TissueHeterogeneityCorrection = ["IMAGE", "ROI_OVERRIDE"]
+        else:
+            ds.TissueHeterogeneityCorrection = "IMAGE"
 
         try:
             _convert_dose_for_trial(
@@ -534,7 +554,18 @@ def _sum_beam_doses(
 
         spacing = [vx, vy, vz]
 
-        # Get the fractional index of the prescription point within the grid
+        # Get the fractional index of the prescription point within the grid.
+        #
+        # construct_dose_from_binary reverses the z-axis (binary high-to-low
+        # is mapped so that array z=Z-1 = first binary = Pinnacle origin,
+        # array z=0 = last binary).  The net effect is:
+        #
+        #   HFS/HFP: dose_grid[0,0,0] is at IPP_z → idx_z = 0 at IPP ✓
+        #   FFS/FFP: dose_grid[0,0,0] is at IPP_z + (Z-1)*vz (the far end
+        #            from IPP) → idx_z needs a (Z-1) offset.
+        #
+        # The orientation_matrix handles x and y correctly for all
+        # orientations; only the z-axis needs the feet-first correction.
         orientation_matrix = np.zeros((3, 3))
         orientation_matrix[0, :] = IMAGE_ORIENTATION_MAP[patient_position][:3]
         orientation_matrix[1, :] = IMAGE_ORIENTATION_MAP[patient_position][3:]
@@ -547,12 +578,18 @@ def _sum_beam_doses(
             idx[i] = -(origin[i] - prescription_point[i]) / spacing[i]
             idx[i] *= orientation_matrix[i, i]
 
+        if patient_position in ("FFS", "FFP"):
+            idx[2] += (dim_z - 1)
+
         plan.logger.debug("Index of prescription point within grid: %s", idx)
 
         cgy_mu = trilinear_interpolation(idx, dose_grid)
         plan.logger.debug("cgy_mu: %s", cgy_mu)
 
-        beam_mu = (total_prescription / cgy_mu) / num_fractions
+        if cgy_mu != 0:
+            beam_mu = (total_prescription / cgy_mu) / num_fractions
+        else:
+            beam_mu = 0
         plan.logger.debug("Beam MU: %s", beam_mu)
 
         # --- Convert dose grid to pixel values ---
