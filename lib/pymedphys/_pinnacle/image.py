@@ -44,20 +44,69 @@ from pymedphys._imports import numpy as np
 from pymedphys._imports import pydicom
 
 from .constants import GImplementationClassUID, GTransferSyntaxUID
+from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
+
+# Slice location sign: for head-first orientations DICOM z = -TablePosition,
+# for feet-first DICOM z = +TablePosition. TablePosition is in cm; DICOM in mm.
+_SLICE_Z_SIGN = {
+    "HFS": -1,
+    "HFP": -1,
+    "FFS": +1,
+    "FFP": +1,
+}
+
+# ImagePositionPatient x/y signs.  The first pixel is at the corner
+# opposite to the row/column direction vectors.  The image centre sits
+# at DICOM (0, 0) in the transverse plane, so:
+#   IPP_x = row_dir_x * (-half_x_mm)   [negate because first pixel is
+#            at the start, not end, of the row direction]
+#   IPP_y = col_dir_y * (-half_y_mm)
+# Because row_dir and col_dir only have one non-zero component each in
+# the four standard positions, this reduces to a sign lookup.
+_IPP_XY_SIGN = {
+    #          (x_sign, y_sign)
+    "HFS":  (-1, -1),
+    "HFP":  (+1, +1),
+    "FFS":  (+1, -1),
+    "FFP":  (-1, +1),
+}
 
 # This function will create dicom image files for each slice using the
 # condensed pixel data from file ImageSet_%s.img
 
 
 def create_image_files(image, export_path):
-    # TODO: Fix this function, output not working
-    image.logger.warn("Creating image files: The output of these are not correct!")
+    """Create DICOM image files from raw Pinnacle binary pixel data.
+
+    Used when the ``ImageSet_N.DICOM/`` directory is absent and images
+    must be reconstructed from ``ImageSet_N.img``.  Handles all standard
+    patient orientations (HFS, HFP, FFS, FFP, and decubitus variants).
+    """
 
     patient_info = image.pinnacle.patient_info
     image_header = image.image_header
     image_info = image.image_info
     image_set = image.image_set
-    currentpatientposition = image_header["patient_position"]
+
+    if not image_header:
+        image.logger.error(
+            "Cannot create image files: image header (.header) is missing"
+        )
+        return
+    if not image_info:
+        image.logger.error(
+            "Cannot create image files: image info (.ImageInfo) is missing"
+        )
+        return
+
+    currentpatientposition = image_header.get("patient_position", "HFS")
+
+    # scan date/time from ImageSet file (may be missing in old archives)
+    dateofscan = ""
+    timeofscan = ""
+    if image_set:
+        dateofscan = image_set.get("scan_date", "")
+        timeofscan = image_set.get("scan_time", "")
 
     modality = "CT"
     try:
@@ -82,14 +131,16 @@ def create_image_files(image, export_path):
     image.logger.debug(image_info[0])
 
     curframe = 0
+    z_sign = _SLICE_Z_SIGN.get(currentpatientposition, -1)
+    x_sign, y_sign = _IPP_XY_SIGN.get(currentpatientposition, (-1, -1))
+    half_x_mm = float(image_header["x_pixdim"]) * 10 * float(image_header["x_dim"]) / 2
+    half_y_mm = float(image_header["y_pixdim"]) * 10 * float(image_header["y_dim"]) / 2
+
     for info in image_info:
-        sliceloc = -info["TablePosition"] * 10
+        sliceloc = z_sign * info["TablePosition"] * 10
         instuid = info["InstanceUID"]
         classuid = info["ClassUID"]
         slicenum = info["SliceNumber"]
-
-        dateofscan = image_set["scan_date"]
-        timeofscan = image_set["scan_time"]
 
         file_meta = pydicom.dataset.Dataset()
         file_meta.MediaStorageSOPClassUID = classuid
@@ -123,7 +174,7 @@ def create_image_files(image, export_path):
         ds.PatientName = patient_info["FullName"]
         ds.PatientID = patient_info["MedicalRecordNumber"]
         ds.PatientBirthDate = patient_info["DOB"]
-        ds.PatientSex = patient_info.get("Gender", [""])[0] if patient_info.get("Gender") else ""
+        ds.PatientSex = patient_info.get("Gender", "")[:1]
         ds.BitsAllocated = 16
         ds.BitsStored = 16
         ds.HighBit = 15
@@ -159,14 +210,21 @@ def create_image_files(image, export_path):
         # what to do with that
         ds.InstanceNumber = slicenum
         ds.ImagePositionPatient = [
-            -float(image_header["x_pixdim"]) * 10 * float(image_header["x_dim"]) / 2,
-            -float(image_header["y_pixdim"]) * 10 * float(image_header["y_dim"]) / 2,
+            x_sign * half_x_mm,
+            y_sign * half_y_mm,
             sliceloc,
         ]
-        if "HFS" in currentpatientposition or "FFS" in currentpatientposition:
-            ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, -0.0]
-        elif "HFP" in currentpatientposition or "FFP" in currentpatientposition:
-            ds.ImageOrientationPatient = [-1.0, 0.0, 0.0, 0.0, -1.0, -0.0]
+        if currentpatientposition in IMAGE_ORIENTATION_MAP:
+            ds.ImageOrientationPatient = [
+                float(v) for v in IMAGE_ORIENTATION_MAP[currentpatientposition]
+            ]
+        else:
+            # Unknown orientation — default to HFS and log a warning
+            image.logger.warning(
+                "Unknown patient position '%s' — defaulting ImageOrientationPatient "
+                "to HFS", currentpatientposition,
+            )
+            ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         ds.PositionReferenceIndicator = "LM"  # ???
         ds.SliceLocation = sliceloc
         ds.SamplesPerPixel = 1
@@ -196,35 +254,51 @@ def convert_image(image, export_path):
     )
 
     if not os.path.exists(dicom_directory):
-        # Image set folder not found, need to ignore patient
-        # Will want to call a function to be written that will create image set
-        # files from the condensed pixel data file
         image.logger.info("Dicom Image files do not exist. Creating image files")
+        create_image_files(image, export_path)
+        return
+
+    # Verify the DICOM directory contains actual DICOM files.  Some older
+    # archives (v7/v8) have an ImageSet_N.DICOM/ directory populated with
+    # raw .img files instead of DICOM — detect this and fall back.
+    dicom_files = []
+    for file in os.listdir(dicom_directory):
+        filepath = os.path.join(dicom_directory, file)
+        if not os.path.isfile(filepath):
+            continue
+        try:
+            test_ds = pydicom.dcmread(filepath, force=True, stop_before_pixels=True)
+            if hasattr(test_ds, "SOPInstanceUID"):
+                dicom_files.append(file)
+        except Exception:
+            pass
+
+    if not dicom_files:
+        image.logger.info(
+            "DICOM directory exists but contains no valid DICOM files "
+            "(%d files found). Falling back to creating image files.",
+            len(os.listdir(dicom_directory)),
+        )
         create_image_files(image, export_path)
         return
 
     patient_info = image.pinnacle.patient_info
     image_set = image.image_set
 
-    for file in os.listdir(dicom_directory):
-        # try:
+    for file in dicom_files:
         imageds = pydicom.dcmread(os.path.join(dicom_directory, file), force=True)
 
         imageds.PatientName = patient_info["FullName"]
         imageds.PatientID = patient_info["MedicalRecordNumber"]
         imageds.PatientBirthDate = patient_info["DOB"]
-        imageds.PatientSex = patient_info.get("Gender", [""])[0] if patient_info.get("Gender") else ""
+        imageds.PatientSex = patient_info.get("Gender", "")[:1]
 
         # Ensure required attributes are present — existing DICOM from
         # the Pinnacle archive may be missing these
         if "StudyTime" not in imageds and image_set:
-            imageds.StudyTime = image_set["scan_time"]
+            imageds.StudyTime = image_set.get("scan_time", "")
         if "SpecificCharacterSet" not in imageds:
             imageds.SpecificCharacterSet = "ISO_IR 100"
-
-        if "SOPInstanceUID" not in imageds:
-            image.logger.warn("Unable to process image: %s", file)
-            continue
 
         preamble = getattr(imageds, "preamble", None)
         if not preamble:

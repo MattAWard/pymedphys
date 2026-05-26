@@ -68,7 +68,7 @@ fonttools==4.62.1
     # via matplotlib
 greenlet==3.4.0 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
     # via sqlalchemy
-idna==3.12
+idna==3.15
     # via requests
 imagesize==2.0.0
     # via sphinx
@@ -341,7 +341,7 @@ toml==0.10.2
     # via pymedphys
 tomli==2.4.1 ; python_full_version < '3.11'
     # via sphinx
-tomlkit==0.14.0
+tomlkit==0.15.0
     # via pymedphys
 tornado==6.5.5
     # via

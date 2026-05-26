@@ -82,7 +82,7 @@ _CT_IMAGE_SOP_CLASS_UID = "1.2.840.10008.5.1.4.1.1.2"
 _STUDY_COMPONENT_SOP_CLASS_UID = "1.2.840.10008.3.1.2.3.2"
 
 
-def _find_closest_slice(image_info_list, z_coord_mm):
+def _find_closest_slice(image_info_list, z_coord_mm, patient_position="HFS"):
     """Find the image slice closest to a given z-coordinate.
 
     Parameters
@@ -91,6 +91,8 @@ def _find_closest_slice(image_info_list, z_coord_mm):
         Each dict must have 'TablePosition' and 'InstanceUID' keys.
     z_coord_mm : float
         The z-coordinate in mm (DICOM patient coordinates).
+    patient_position : str
+        Patient position string, e.g. 'HFS', 'FFS'.
 
     Returns
     -------
@@ -102,9 +104,14 @@ def _find_closest_slice(image_info_list, z_coord_mm):
     closest_uid = None
 
     for s in image_info_list:
-        # Pinnacle stores table position in cm, z_coord is in mm (DICOM),
-        # and the sign convention depends on orientation.
-        distance = abs(float(s["TablePosition"]) - (-z_coord_mm / 10))
+        # Pinnacle stores table position in cm, z_coord is in mm (DICOM).
+        # For head-first (HFS/HFP): DICOM z = -Pinnacle z  →  table_pos ≈ -z/10
+        # For feet-first (FFS/FFP): DICOM z =  Pinnacle z  →  table_pos ≈  z/10
+        if patient_position in ("FFS", "FFP"):
+            pinnacle_z_cm = z_coord_mm / 10
+        else:
+            pinnacle_z_cm = -z_coord_mm / 10
+        distance = abs(float(s["TablePosition"]) - pinnacle_z_cm)
         if distance <= closest_distance:
             closest_distance = distance
             closest_uid = s["InstanceUID"]
@@ -233,6 +240,8 @@ def read_points(ds, plan):
     """
     plan.roi_count = 0
     image_info = plan.primary_image.image_info
+    image_header = plan.primary_image.image_header
+    patient_position = image_header["patient_position"]
     frame_uid = image_info[0]["FrameUID"]
 
     for point in plan.points:
@@ -251,7 +260,7 @@ def read_points(ds, plan):
         contour.NumberOfContourPoints = 1
         contour.ContourImageSequence = _new_sequence()
         contour.ContourImageSequence.append(
-            _find_closest_slice(image_info, refpoint[-1])
+            _find_closest_slice(image_info, refpoint[-1], patient_position)
         )
         roi_contour.ContourSequence.append(contour)
         ds.ROIContourSequence.append(roi_contour)
@@ -297,6 +306,11 @@ def read_roi(ds, plan, skip_pattern):
     plan.logger.debug("Will skip ROIs matching pattern[%s]", skip_pattern)
     plan.logger.debug("Reading ROI from: %s", path_roi)
 
+    if not os.path.exists(path_roi):
+        plan.logger.warning("plan.roi not found at: %s — no ROI contours to export",
+                            path_roi)
+        return ds
+
     # State variables for the line-by-line parser
     flag_skip_roi = False
     flag_points = False
@@ -330,7 +344,7 @@ def read_roi(ds, plan, skip_pattern):
                 contour_item.ContourImageSequence = _new_sequence()
                 if len(points) >= 3:
                     contour_item.ContourImageSequence.append(
-                        _find_closest_slice(image_info, points[-1])
+                        _find_closest_slice(image_info, points[-1], patient_position)
                     )
 
                 del points[:]
@@ -543,7 +557,7 @@ def convert_struct_for_trial(
     # --- Patient ---
     ds.PatientID = patient_info["MedicalRecordNumber"]
     ds.PatientName = patient_info["FullName"]
-    ds.PatientSex = patient_info["Gender"][0]
+    ds.PatientSex = patient_info.get("Gender", "")[:1]
     ds.PatientBirthDate = patient_info["DOB"]
     ds.ReferringPhysicianName = patient_info["ReferringPhysician"]
     ds.PhysiciansOfRecord = patient_info["RadiationOncologist"]

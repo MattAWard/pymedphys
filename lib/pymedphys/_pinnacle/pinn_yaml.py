@@ -38,9 +38,120 @@
 # SOFTWARE.
 
 
+import logging
 import re
 
 from pymedphys._imports import yaml
+
+logger = logging.getLogger(__name__)
+
+
+def _sanitise_line(line):
+    """Clean a single line to avoid YAML parse failures.
+
+    Handles several edge cases seen in older Pinnacle archives:
+    - Unquoted values containing special YAML characters (: # [ ] { })
+    - Backslash sequences that confuse the YAML parser
+    - Trailing whitespace / carriage returns
+    """
+    # Strip trailing whitespace / CR
+    line = line.rstrip()
+
+    # If the line contains a key = value or key : value assignment,
+    # ensure the value portion is safe for YAML.
+    m = re.match(r'^(\s*\S+\s*:\s*)(.*)', line)
+    if m:
+        prefix, value = m.group(1), m.group(2)
+        value = value.rstrip(';').strip()
+        if value:
+            # Quote the value if it contains YAML-hostile characters and
+            # isn't already quoted.
+            needs_quoting = (
+                not (value.startswith('"') and value.endswith('"'))
+                and not (value.startswith("'") and value.endswith("'"))
+                and re.search(r'[:\\#\[\]{}]', value)
+            )
+            if needs_quoting:
+                # Escape existing double-quotes inside the value
+                escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+                line = f'{prefix}"{escaped}"'
+            else:
+                line = f'{prefix}{value}'
+        else:
+            line = prefix
+
+    # Re-add the newline that callers expect
+    return line + "\n"
+
+
+def _fallback_parse(data_lines):
+    """Best-effort key-value parser for when YAML conversion fails.
+
+    Reads Pinnacle's pseudo-YAML as flat key = value pairs and nested
+    blocks.  This is intentionally simple — it doesn't handle every
+    Pinnacle construct, but it's good enough to extract the fields that
+    the export pipeline actually reads (patient setup, machine info,
+    points, etc.) without crashing.
+    """
+    result = {}
+    stack = [result]    # stack of dicts/lists being built
+    list_depths = set()
+
+    for raw_line in data_lines:
+        line = raw_line.strip()
+
+        # Skip empty, comment open/close, and closing braces that
+        # just terminate blocks.
+        if not line or line.startswith('/*') or line.startswith('*/'):
+            continue
+        if line == '};' or line == '}':
+            if len(stack) > 1:
+                stack.pop()
+            continue
+
+        # Block opener: "Key ={" or "Key = {"
+        m = re.match(r'^(\S+)\s*=\s*\{', line)
+        if m:
+            key = m.group(1)
+            indent = len(raw_line) - len(raw_line.lstrip())
+            if 'Array' in key or 'List' in key:
+                list_depths.add(indent)
+                new_list = []
+                if isinstance(stack[-1], dict):
+                    stack[-1][key] = new_list
+                stack.append(new_list)
+            else:
+                new_dict = {}
+                if isinstance(stack[-1], dict):
+                    stack[-1][key] = new_dict
+                elif isinstance(stack[-1], list):
+                    stack[-1].append(new_dict)
+                stack.append(new_dict)
+            continue
+
+        # Simple assignment: "Key = Value;"
+        m = re.match(r'^(\S+)\s*=\s*(.*?)\s*;?\s*$', line)
+        if m:
+            key, val = m.group(1), m.group(2)
+            # Strip surrounding quotes
+            if val.startswith('"') and val.endswith('"'):
+                val = val[1:-1]
+            else:
+                # Try numeric conversion
+                try:
+                    val = int(val)
+                except ValueError:
+                    try:
+                        val = float(val)
+                    except ValueError:
+                        pass
+            if isinstance(stack[-1], dict):
+                stack[-1][key] = val
+            elif isinstance(stack[-1], list):
+                stack[-1].append({key: val})
+            continue
+
+    return result
 
 
 # if multiple trials, result = list of dicts,  otherwise single dict
@@ -48,6 +159,9 @@ def pinn_to_dict(filename):
     result = None
     with open(filename, encoding="ISO-8859-1", errors="ignore") as fp:
         data = fp.readlines()
+
+        if not data:
+            return result
 
         # Split data into smaller chunks, if first line appears more than one
         # Useful for plan.Trial files with more than one Trial
@@ -66,11 +180,37 @@ def pinn_to_dict(filename):
 
             split_data = data[indices[i] : next_index]
 
+            try:
+                yaml_text = convert_to_yaml(split_data)
+                d = yaml.safe_load(yaml_text)
+            except Exception as exc:
+                logger.warning(
+                    "YAML parse failed for '%s' (segment %d): %s — "
+                    "attempting sanitised re-parse",
+                    filename, i, exc,
+                )
+                try:
+                    sanitised = [_sanitise_line(l) for l in split_data]
+                    yaml_text = convert_to_yaml(sanitised)
+                    d = yaml.safe_load(yaml_text)
+                except Exception as exc2:
+                    logger.warning(
+                        "Sanitised YAML parse also failed for '%s' (segment %d): %s — "
+                        "falling back to line-by-line parser",
+                        filename, i, exc2,
+                    )
+                    d = _fallback_parse(split_data)
+
+            if d is None:
+                continue
+
             if isinstance(result, list):
-                d = yaml.safe_load(convert_to_yaml(split_data))
-                result.append(d[list(d.keys())[0]])
+                if isinstance(d, dict) and len(d) == 1:
+                    result.append(d[list(d.keys())[0]])
+                else:
+                    result.append(d)
             else:
-                result = yaml.safe_load(convert_to_yaml(split_data))
+                result = d
 
     return result
 
@@ -81,13 +221,20 @@ def convert_to_yaml(data):
     in_comment = False
     c = 0
     for _, line in enumerate(data, 0):
-        # Remove comment lines
-        if re.search(r"^\/\*", line) or in_comment:
-            in_comment = True
+        # Remove comment blocks.  A comment may open and close on the
+        # same line (e.g. ``/* ... */``), so check the close *after*
+        # detecting the open rather than on the next iteration.
+        if in_comment:
+            if re.search(r"\*\/", line):
+                in_comment = False
             continue
 
-        if re.search(r"\*\/", line):
-            in_comment = False
+        if re.search(r"^\/\*", line):
+            # Check if the comment also closes on this same line
+            if re.search(r"\*\/", line):
+                in_comment = False
+            else:
+                in_comment = True
             continue
 
         # Get the indentation of this line
@@ -116,8 +263,8 @@ def convert_to_yaml(data):
         line = re.sub(" ={", " :", line)
         line = re.sub(" = ", " : ", line)
 
-        # Remove semicolons at end of lines
-        line = re.sub(";$", "", line)
+        # Remove semicolons at end of lines (tolerant of trailing whitespace)
+        line = re.sub(r";\s*$", "\n", line)
 
         out += "" + line
         c += 1

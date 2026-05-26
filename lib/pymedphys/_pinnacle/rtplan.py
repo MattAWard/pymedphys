@@ -429,7 +429,7 @@ def convert_plan_for_trial(
     ds.PatientName = patient_info["FullName"]
     ds.PatientBirthDate = patient_info["DOB"]
     ds.PatientID = patient_info["MedicalRecordNumber"]
-    ds.PatientSex = patient_info["Gender"][0]
+    ds.PatientSex = patient_info.get("Gender", "")[:1]
     ds.StudyInstanceUID = image_info["StudyInstanceUID"]
     ds.SeriesInstanceUID = series_instance_uid
     ds.StudyID = plan.primary_image.image["StudyID"]
