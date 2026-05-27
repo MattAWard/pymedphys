@@ -34,6 +34,8 @@ These helpers parse and combine those two signals to:
 """
 
 import re
+import threading
+import time
 
 # Maximum length of the DICOM `ST` (Short Text) VR used by RTPlanDescription
 # and StructureSetDescription. SeriesDescription (LO) is shorter (64) but
@@ -319,3 +321,188 @@ def append_pinnacle_metadata_for_plan(existing_description, plan, trial_info,
     if len(combined) > max_length:
         combined = combined[: max_length - 3].rstrip() + "..."
     return combined
+
+
+# --- DICOM General Equipment tag stamping ------------------------------------
+#
+# These helpers set Manufacturer, ManufacturerModelName, SoftwareVersions
+# and InstitutionName on a DICOM dataset, composing existing Pinnacle
+# values with site-specific suffixes loaded from config.json.
+#
+# The separator between "Pinnacle value" and "our suffix" defaults to "-"
+# so that downstream readers can trivially split on it.
+
+_EQUIPMENT_SEP = "-"
+
+
+def _join_with_sep(base, suffix, sep=_EQUIPMENT_SEP):
+    """Join *base* and *suffix* with *sep*, handling empty parts cleanly.
+
+    * Both present  → ``"base-suffix"``
+    * Only base     → ``"base"``
+    * Only suffix   → ``"suffix"``
+    * Both empty    → ``""``
+    """
+    base = (base or "").strip()
+    suffix = (suffix or "").strip()
+    if base and suffix:
+        return f"{base}{sep}{suffix}"
+    return base or suffix
+
+
+def apply_equipment_stamps(ds, equipment_cfg, pinnacle_model="",
+                           pinnacle_sw="", sep=_EQUIPMENT_SEP):
+    """Set the four DICOM General Equipment tags on *ds*.
+
+    Composes each field from a Pinnacle-originated base value and a
+    site-specific suffix drawn from *equipment_cfg* (the
+    ``config["DICOM_EQUIPMENT"]`` dict).
+
+    For RT objects the callers pass the Pinnacle plan_info values as
+    *pinnacle_model* (``ToolType``) and *pinnacle_sw*
+    (``PinnacleVersionDescription``).  For synthesised images where
+    those values are unavailable the defaults (empty strings) result in
+    only the suffix being written.
+
+    Parameters
+    ----------
+    ds : pydicom.dataset.Dataset
+        The dataset to stamp.
+    equipment_cfg : dict
+        Should contain any/all of the below:
+        ``MANUFACTURER_SUFFIX``, ``MODEL_NAME_SUFFIX``,
+        ``SOFTWARE_VERSION_SUFFIX``, ``INSTITUTION_SUFFIX``.
+        Missing keys are silently treated as empty strings.
+    pinnacle_model : str
+        Pinnacle ``ToolType`` value (e.g. ``"Pinnacle3"``).
+    pinnacle_sw : str
+        Pinnacle ``PinnacleVersionDescription`` (e.g. ``"16.0"``).
+    sep : str
+        Separator between base and suffix (default ``"-"``).
+    """
+    if not equipment_cfg:
+        # No config supplied — preserve legacy behaviour: leave
+        # whatever the caller already wrote on ds untouched.
+        return
+
+    pinnacle_mfr = "Philips"
+    mfr_suffix = equipment_cfg.get("MANUFACTURER_SUFFIX", "")
+    model_suffix = equipment_cfg.get("MODEL_NAME_SUFFIX", "")
+    sw_suffix = equipment_cfg.get("SOFTWARE_VERSION_SUFFIX", "")
+    institution = equipment_cfg.get("INSTITUTION_SUFFIX", "")
+
+    mfr_val = _join_with_sep(pinnacle_mfr, mfr_suffix, sep)
+    if mfr_val:
+        ds.Manufacturer = mfr_val
+
+    model_val = _join_with_sep(pinnacle_model, model_suffix, sep)
+    if model_val:
+        ds.ManufacturerModelName = model_val
+
+    sw_val = _join_with_sep(pinnacle_sw, sw_suffix, sep)
+    if sw_val:
+        ds.SoftwareVersions = [sw_val]
+
+    if institution:
+        ds.InstitutionName = institution
+
+
+# --- Pinn2Dicom UID generation -----------------------------------------------
+#
+# Implements the custom UID algorithm:
+#   UID = uid_root.secs.clocks.counts.modality
+#
+# * secs     — seconds from 01/01/1970 (Unix epoch)
+# * clocks   — clock ticks (microseconds since process start) mod 10^5
+# * counts   — call counter for the application instance's lifetime mod 1000
+# * modality — zero-padded 3-digit index per object type
+#
+# The generator is a module-level singleton so the counter persists across
+# all PinnacleExport / PinnaclePlan instances created during a single run
+# of the application (web server or CLI).
+
+# Modality indices — arbitrary but fixed per DICOM object type.
+UID_MODALITY_INDEX = {
+    "struct":        "001",  # RTSTRUCT
+    "plan":          "002",  # RTPLAN
+    "dose":          "003",  # RTDOSE
+    "series_struct": "004",  # Series UID for RTSTRUCT
+    "series_plan":   "005",  # Series UID for RTPLAN
+    "series_dose":   "006",  # Series UID for RTDOSE
+}
+
+
+class _UIDGenerator:
+    """Thread-safe UID generator following the Pinn2Dicom algorithm.
+
+    A single instance lives at module level (``_uid_generator``).  The
+    public entry point is :func:`generate_pinn2dicom_uid`.
+
+    Example output::
+
+        1.2.826.0.1.3680043.10.1361.1766177687.37.32.003
+    """
+
+    _MAX_UID_LENGTH = 64  # DICOM PS3.5 §9.1
+
+    def __init__(self):
+        self._counter = 0
+        self._lock = threading.Lock()
+        # Reference point for clock-tick component — set once at import.
+        self._start_ns = time.perf_counter_ns()
+
+    def generate(self, uid_root, modality_key):
+        """Return a new UID string.
+
+        Parameters
+        ----------
+        uid_root : str
+            Registered DICOM UID root, e.g.
+            ``"1.2.826.0.1.3680043.10.1361"``.
+        modality_key : str
+            One of the keys in :data:`UID_MODALITY_INDEX`.
+        """
+        modality_index = UID_MODALITY_INDEX[modality_key]
+
+        with self._lock:
+            self._counter += 1
+            counts = self._counter % 1000
+
+        secs = int(time.time())
+        # Microseconds elapsed since process start, capped to 5 digits.
+        clocks = ((time.perf_counter_ns() - self._start_ns) // 1000) % 100000
+
+        uid = f"{uid_root}.{secs}.{clocks}.{counts}.{modality_index}"
+
+        if len(uid) > self._MAX_UID_LENGTH:
+            raise ValueError(
+                f"Generated UID exceeds {self._MAX_UID_LENGTH} chars "
+                f"({len(uid)}): {uid}"
+            )
+        return uid
+
+
+# Module-level singleton — call counter persists for the lifetime of the
+# application process (Flask/waitress server or CLI invocation).
+_uid_generator = _UIDGenerator()
+
+
+def generate_pinn2dicom_uid(uid_root, modality_key):
+    """Generate a single DICOM UID using the Pinn2Dicom algorithm.
+
+    Parameters
+    ----------
+    uid_root : str
+        The registered DICOM UID root
+        (e.g. ``"1.2.826.0.1.3680043.10.1361"``).
+    modality_key : str
+        One of ``"struct"``, ``"plan"``, ``"dose"``,
+        ``"series_struct"``, ``"series_plan"``, ``"series_dose"``.
+
+    Returns
+    -------
+    str
+        A valid DICOM UID of the form
+        ``uid_root.secs.clocks.counts.modality_index``.
+    """
+    return _uid_generator.generate(uid_root, modality_key)

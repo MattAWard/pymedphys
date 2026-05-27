@@ -44,6 +44,7 @@ from pymedphys._imports import numpy as np
 from pymedphys._imports import pydicom
 
 from .constants import GImplementationClassUID, GTransferSyntaxUID
+from .pinnacle_metadata import apply_equipment_stamps
 from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
 
 # Slice location sign: for head-first orientations DICOM z = -TablePosition,
@@ -156,7 +157,7 @@ def create_image_files(image, export_path):
         )
 
         ds.SpecificCharacterSet = "ISO_IR 100"
-        ds.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
+        ds.ImageType = ["DERIVED", "PRIMARY", "AXIAL"]
         ds.AccessionNumber = ""
         ds.SOPClassUID = classuid
         ds.SOPInstanceUID = instuid
@@ -167,10 +168,18 @@ def create_image_files(image, export_path):
         ds.StudyTime = timeofscan
         ds.AcquisitionTime = timeofscan
         ds.Modality = modality
-        # This should come from Manufacturer in header, but for some
-        # patients it isn't set??
-        ds.Manufacturer = ""
+        ds.Manufacturer = ""  # Type 2; overwritten by apply_equipment_stamps
+        ds.DerivationDescription = (
+            "Reconstructed from Pinnacle binary image archive by Pinn2Dicom"
+        )
         ds.StationName = modality
+
+        # Apply site-specific equipment identification stamps from config.
+        # For synthesised images there is no Pinnacle plan_info, so only
+        # the configured values (manufacturer, institution, etc.) are set.
+        equipment_cfg = getattr(image.pinnacle, "equipment_cfg", {})
+        apply_equipment_stamps(ds, equipment_cfg)
+
         ds.PatientName = patient_info["FullName"]
         ds.PatientID = patient_info["MedicalRecordNumber"]
         ds.PatientBirthDate = patient_info["DOB"]

@@ -44,6 +44,7 @@ import re
 from pymedphys._imports import pydicom
 
 from .pinn_yaml import pinn_to_dict
+from .pinnacle_metadata import generate_pinn2dicom_uid
 from .rtstruct import find_iso_center
 
 # Medical Connections offers free valid UIDs
@@ -505,31 +506,49 @@ class PinnaclePlan:
             )
             return self._trial_uid_cache[cache_key]
 
-        entropy_srcs = None
-        if uid_type == "HASH":
-            entropy_srcs = [
-                self._pinnacle.patient_info["MedicalRecordNumber"],
-                self.plan_info["PlanName"],
-                trial_info["Name"],
-                trial_info["ObjectVersion"]["WriteTimeStamp"],
-            ]
+        # --- UID generation strategy ---
+        # When DICOM_EQUIPMENT.UID_ROOT is configured, use the custom
+        # Pinn2Dicom algorithm:  uid_root.secs.clocks.counts.modality
+        # Otherwise fall back to pydicom's random/hash-based generation
+        # with the legacy Medical Connections prefix.
+        uid_root = getattr(self._pinnacle, "equipment_cfg", {}).get("UID_ROOT", "")
 
-        plan_uid = pydicom.uid.generate_uid(
-            prefix=f"{self._uid_prefix}1.", entropy_srcs=entropy_srcs
-        )
-        dose_uid = pydicom.uid.generate_uid(
-            prefix=f"{self._uid_prefix}2.", entropy_srcs=entropy_srcs
-        )
-        struct_uid = pydicom.uid.generate_uid(
-            prefix=f"{self._uid_prefix}3.", entropy_srcs=entropy_srcs
-        )
+        if uid_root:
+            # Custom Pinn2Dicom algorithm — always unique per call,
+            # uid_type (HASH vs RANDOM) does not apply here.
+            plan_uid = generate_pinn2dicom_uid(uid_root, "plan")
+            dose_uid = generate_pinn2dicom_uid(uid_root, "dose")
+            struct_uid = generate_pinn2dicom_uid(uid_root, "struct")
+            series_plan_uid = generate_pinn2dicom_uid(uid_root, "series_plan")
+            series_dose_uid = generate_pinn2dicom_uid(uid_root, "series_dose")
+            series_struct_uid = generate_pinn2dicom_uid(uid_root, "series_struct")
+        else:
+            # Legacy pydicom-based generation
+            entropy_srcs = None
+            if uid_type == "HASH":
+                entropy_srcs = [
+                    self._pinnacle.patient_info["MedicalRecordNumber"],
+                    self.plan_info["PlanName"],
+                    trial_info["Name"],
+                    trial_info["ObjectVersion"]["WriteTimeStamp"],
+                ]
 
-        # Series Instance UIDs are always random — they must never equal
-        # the SOP Instance UID (different DICOM hierarchy levels) and
-        # deterministic series UIDs offer no benefit.
-        series_plan_uid = pydicom.uid.generate_uid()
-        series_dose_uid = pydicom.uid.generate_uid()
-        series_struct_uid = pydicom.uid.generate_uid()
+            plan_uid = pydicom.uid.generate_uid(
+                prefix=f"{self._uid_prefix}1.", entropy_srcs=entropy_srcs
+            )
+            dose_uid = pydicom.uid.generate_uid(
+                prefix=f"{self._uid_prefix}2.", entropy_srcs=entropy_srcs
+            )
+            struct_uid = pydicom.uid.generate_uid(
+                prefix=f"{self._uid_prefix}3.", entropy_srcs=entropy_srcs
+            )
+
+            # Series Instance UIDs are always random — they must never equal
+            # the SOP Instance UID (different DICOM hierarchy levels) and
+            # deterministic series UIDs offer no benefit.
+            series_plan_uid = pydicom.uid.generate_uid()
+            series_dose_uid = pydicom.uid.generate_uid()
+            series_struct_uid = pydicom.uid.generate_uid()
 
         self.logger.debug(
             "Trial '%s' UIDs - plan: %s, dose: %s, struct: %s",

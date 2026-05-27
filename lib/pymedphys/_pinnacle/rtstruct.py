@@ -50,11 +50,11 @@ from pymedphys._dicom.create import set_default_transfer_syntax
 from .constants import (
     GImplementationClassUID,
     GTransferSyntaxUID,
-    Manufacturer,
     RTSTRUCTModality,
     RTStructSOPClassUID,
     colors,
 )
+from .pinnacle_metadata import apply_equipment_stamps
 
 
 # ---------------------------------------------------------------------------
@@ -535,11 +535,18 @@ def convert_struct_for_trial(
     ds.SOPInstanceUID = struct_instance_uid
     ds.Modality = RTSTRUCTModality
     ds.AccessionNumber = ""
-    ds.Manufacturer = Manufacturer
+    ds.Manufacturer = ""  # Type 2; overwritten by apply_equipment_stamps
 
     ds.StationName = "adacp3u7"  # TODO: determine proper station name
     ds.ManufacturerModelName = plan_info.get("ToolType", "")
     ds.SoftwareVersions = plan_info["PinnacleVersionDescription"]
+
+    # Apply site-specific equipment identification stamps from config
+    apply_equipment_stamps(
+        ds, plan.pinnacle.equipment_cfg,
+        pinnacle_model=plan_info.get("ToolType", ""),
+        pinnacle_sw=plan_info.get("PinnacleVersionDescription", ""),
+    )
 
     # --- Referenced Study ---
     ds.ReferencedStudySequence = _new_sequence()
