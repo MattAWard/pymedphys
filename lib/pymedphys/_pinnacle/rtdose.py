@@ -57,11 +57,11 @@ from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
 from .constants import (
     GImplementationClassUID,
     GTransferSyntaxUID,
-    Manufacturer,
     RTDOSEModality,
     RTDoseSOPClassUID,
     RTPlanSOPClassUID,
 )
+from .pinnacle_metadata import apply_equipment_stamps
 
 
 # ---------------------------------------------------------------------------
@@ -285,10 +285,17 @@ def convert_dose(plan, export_path):
 
     ds.AccessionNumber = ""
     ds.Modality = RTDOSEModality
-    ds.Manufacturer = Manufacturer
+    ds.Manufacturer = ""  # Type 2; overwritten by apply_equipment_stamps
     ds.OperatorsName = ""
     ds.ManufacturerModelName = plan_info.get("ToolType", "")
     ds.SoftwareVersions = [plan_info["PinnacleVersionDescription"]]
+
+    # Apply site-specific equipment identification stamps from config
+    apply_equipment_stamps(
+        ds, plan.pinnacle.equipment_cfg,
+        pinnacle_model=plan_info.get("ToolType", ""),
+        pinnacle_sw=plan_info.get("PinnacleVersionDescription", ""),
+    )
 
     ds.PhysiciansOfRecord = patient_info["RadiationOncologist"]
     ds.PatientName = patient_info["FullName"]

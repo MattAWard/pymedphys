@@ -51,12 +51,11 @@ from pymedphys._pinnacle.pinnacle_exceptions import (
 from .constants import (
     GImplementationClassUID,
     GTransferSyntaxUID,
-    Manufacturer,
     RTPLANModality,
     RTPlanSOPClassUID,
     RTStructSOPClassUID,
 )
-from .pinnacle_metadata import append_pinnacle_metadata_for_plan
+from .pinnacle_metadata import append_pinnacle_metadata_for_plan, apply_equipment_stamps
 
 
 # ---------------------------------------------------------------------------
@@ -421,10 +420,17 @@ def convert_plan_for_trial(
     ds.StudyTime = datetimesplit[1].replace(":", "")
     ds.AccessionNumber = ""
     ds.Modality = RTPLANModality
-    ds.Manufacturer = Manufacturer
+    ds.Manufacturer = ""  # Type 2; overwritten by apply_equipment_stamps
     ds.OperatorsName = ""
     ds.ManufacturerModelName = plan_info.get("ToolType", "")
     ds.SoftwareVersions = [plan_info["PinnacleVersionDescription"]]
+
+    # Apply site-specific equipment identification stamps from config
+    apply_equipment_stamps(
+        ds, plan.pinnacle.equipment_cfg,
+        pinnacle_model=plan_info.get("ToolType", ""),
+        pinnacle_sw=plan_info.get("PinnacleVersionDescription", ""),
+    )
     ds.PhysiciansOfRecord = patient_info["RadiationOncologist"]
     ds.PatientName = patient_info["FullName"]
     ds.PatientBirthDate = patient_info["DOB"]
@@ -497,7 +503,7 @@ def convert_plan_for_trial(
         beam_ds = _new_dataset()
         ds.BeamSequence.append(beam_ds)
 
-        beam_ds.Manufacturer = Manufacturer
+        beam_ds.Manufacturer = ds.Manufacturer  # Consistent with plan-level stamp
         beam_ds.BeamNumber = beam_count
         beam_ds.TreatmentDeliveryType = "TREATMENT"
         beam_ds.ReferencedPatientSetupNumber = beam_count

@@ -49,8 +49,6 @@ RTDoseSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.2"
 RTStructSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.3"
 RTPlanSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.5"
 
-Manufacturer = "PyMedPhys Pinnacle Export"
-
 # Colors
 colors = {}
 colors["red"] = ["255", "0", "0"]
