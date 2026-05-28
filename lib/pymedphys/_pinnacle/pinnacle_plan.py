@@ -53,6 +53,28 @@ from .rtstruct import find_iso_center
 UID_PREFIX = "1.2.826.0.1.3680043.10.202."
 
 
+def _parse_pinnacle_major_version(version_description):
+    """Extract the major version number from a PinnacleVersionDescription.
+
+    Examples
+    --------
+    >>> _parse_pinnacle_major_version("Pinnacle v16.4")
+    16.0
+    >>> _parse_pinnacle_major_version("Pinnacle3 v8.0m")
+    8.0
+    >>> _parse_pinnacle_major_version("Pinnacle v9.10")
+    9.0
+
+    Returns ``None`` if the string cannot be parsed.
+    """
+    if not version_description:
+        return None
+    match = re.search(r"(\d+)\.(\d+)", str(version_description))
+    if match:
+        return float(match.group(1))
+    return None
+
+
 class PinnaclePlan:
     """Represents a plan within the Pinnacle data.
 
@@ -418,6 +440,159 @@ class PinnaclePlan:
     def iso_center(self, iso_center):
         self._iso_center = iso_center
 
+    @property
+    def coordinate_shift(self):
+        """Pre-v9 in-plane coordinate correction.
+
+        In Pinnacle v8 (and earlier), POI, ROI contour, and dose-grid
+        coordinates are stored in an *absolute* internal frame.  The
+        current ``convert_point`` / ``_transform_point_for_position`` /
+        dose-origin code converts them with a simple sign-flip per
+        patient position, which is correct for v9+ (where coordinates
+        are relative to the image centre) but wrong for v8.
+
+        The mismatch arises because, for every in-plane axis whose sign
+        is flipped during conversion, the DICOM ``ImagePositionPatient``
+        sits at the *end* of the Pinnacle range rather than the start.
+        The sign-flip alone accounts for direction but not origin.
+
+        The correction for each flipped in-plane axis is::
+
+            +2 * axis_end * 10          (mm)
+
+        where ``axis_end = axis_start + (dim − 1) * pixdim``  (cm).
+
+        Z (through-plane) is never corrected because each slice carries
+        its own ``ImagePositionPatient`` z-value.
+
+        ======  ==========  ==========  ==========
+        Orient  X flipped?  Y flipped?  Correction
+        ======  ==========  ==========  ==========
+        HFS     no          yes         y only
+        HFP     yes         no          x only
+        FFS     yes         yes         x and y
+        FFP     no          no          none
+        ======  ==========  ==========  ==========
+
+        Returns
+        -------
+        shift : tuple of float
+            ``(xshift, yshift, zshift)`` in mm.  All zeros for v9+.
+        """
+        if hasattr(self, "_coordinate_shift_cache"):
+            return self._coordinate_shift_cache
+
+        # Default: no shift
+        shift = (0.0, 0.0, 0.0)
+
+        # Determine the Pinnacle major version
+        version_desc = self._plan_info.get("PinnacleVersionDescription", "")
+        major = _parse_pinnacle_major_version(version_desc)
+
+        if major is not None and major >= 9:
+            self.logger.debug(
+                "Pinnacle version %.0f (>= 9) — no coordinate shift needed",
+                major,
+            )
+            self._coordinate_shift_cache = shift
+            return shift
+
+        if major is None:
+            # Cannot determine version — default to no shift.  Applying
+            # the pre-v9 correction to a v9+ archive would be destructive,
+            # so the safe default is to skip.
+            self.logger.warning(
+                "Cannot determine Pinnacle version from '%s' — "
+                "defaulting to no coordinate shift.  If this is a pre-v9 "
+                "archive, coordinates may be incorrect.",
+                version_desc,
+            )
+            self._coordinate_shift_cache = shift
+            return shift
+
+        # major < 9 — read geometry from the image header
+        if not self._primary_image or not self._primary_image.image_header:
+            self.logger.warning(
+                "Cannot compute coordinate shift: no primary image header. "
+                "Assuming zero shift."
+            )
+            self._coordinate_shift_cache = shift
+            return shift
+
+        hdr = self._primary_image.image_header
+
+        try:
+            x_dim = float(hdr["x_dim"])
+            y_dim = float(hdr["y_dim"])
+            x_pixdim = float(hdr["x_pixdim"])  # cm
+            y_pixdim = float(hdr["y_pixdim"])
+            x_start = float(hdr.get("x_start", "0"))  # cm
+            y_start = float(hdr.get("y_start", "0"))
+        except (KeyError, ValueError, TypeError) as exc:
+            self.logger.warning(
+                "Cannot read header fields for coordinate shift (%s). "
+                "Assuming zero shift.", exc,
+            )
+            self._coordinate_shift_cache = shift
+            return shift
+
+        patient_position = self.patient_position
+
+        # End of the Pinnacle image extent along each in-plane axis (cm).
+        x_end = x_start + (x_dim - 1) * x_pixdim
+        y_end = y_start + (y_dim - 1) * y_pixdim
+
+        # For each in-plane axis that the sign-flip conversion inverts,
+        # the DICOM IPP sits at axis_end rather than axis_start.  The
+        # correction is  +2 * axis_end * 10  (cm → mm).
+        # Z is per-slice so never needs correction.
+        xshift = 0.0
+        yshift = 0.0
+
+        if patient_position == "HFS":
+            # Y flipped, X not flipped
+            yshift = 2 * y_end * 10
+        elif patient_position == "HFP":
+            # X flipped, Y not flipped
+            xshift = 2 * x_end * 10
+        elif patient_position == "FFS":
+            # X and Y both flipped
+            xshift = 2 * x_end * 10
+            yshift = 2 * y_end * 10
+        elif patient_position == "FFP":
+            # Neither flipped
+            pass
+        else:
+            self.logger.warning(
+                "Unsupported patient position '%s' for coordinate shift "
+                "calculation — assuming zero shift.", patient_position,
+            )
+            self._coordinate_shift_cache = shift
+            return shift
+
+        shift = (
+            round(xshift, 5),
+            round(yshift, 5),
+            0.0,  # z is never corrected
+        )
+
+        if shift == (0.0, 0.0, 0.0):
+            self.logger.debug(
+                "Pre-v9 coordinate shift is zero (version: %s, "
+                "position: %s).", version_desc or "unknown",
+                patient_position,
+            )
+        else:
+            self.logger.info(
+                "Pre-v9 coordinate shift computed (version: %s, "
+                "position: %s): x=%.3f mm, y=%.3f mm, z=%.3f mm",
+                version_desc or "unknown", patient_position,
+                shift[0], shift[1], shift[2],
+            )
+
+        self._coordinate_shift_cache = shift
+        return shift
+
     @staticmethod
     def is_prefix_valid(prefix):
         """Check if a UID prefix is valid.
@@ -631,6 +806,10 @@ class PinnaclePlan:
     def convert_point(self, point):
         """Convert a point from Pinnacle coordinates to DICOM coordinates.
 
+        Applies sign conversion per patient position (cm → mm) and, for
+        pre-v9 Pinnacle archives, an additional coordinate shift derived
+        from the image header's ``x_start``/``y_start``/``z_start`` fields.
+
         Parameters
         ----------
             point : list
@@ -660,6 +839,12 @@ class PinnaclePlan:
             or image_header["patient_position"] == "HFP"
         ):
             refpoint[2] = -(refpoint[2])
+
+        # Apply pre-v9 coordinate shift (zero for v9+)
+        xshift, yshift, zshift = self.coordinate_shift
+        refpoint[0] += xshift
+        refpoint[1] += yshift
+        refpoint[2] += zshift
 
         point["refpoint"] = refpoint
 

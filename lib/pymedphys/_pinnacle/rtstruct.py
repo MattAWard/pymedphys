@@ -123,7 +123,7 @@ def _find_closest_slice(image_info_list, z_coord_mm, patient_position="HFS"):
     return contour_image
 
 
-def _transform_point_for_position(curr_points, patient_position):
+def _transform_point_for_position(curr_points, patient_position, coordinate_shift=(0.0, 0.0, 0.0)):
     """Transform ROI contour points from Pinnacle coordinates to DICOM patient coords.
 
     Pinnacle stores coordinates in cm; DICOM uses mm. The sign conventions
@@ -135,6 +135,9 @@ def _transform_point_for_position(curr_points, patient_position):
         Three string values [x, y, z] from the plan.roi file.
     patient_position : str
         One of 'HFS', 'HFP', 'FFS', 'FFP'.
+    coordinate_shift : tuple of float, optional
+        ``(xshift, yshift, zshift)`` in mm for pre-v9 archives.
+        Defaults to ``(0, 0, 0)`` (no shift).
 
     Returns
     -------
@@ -150,7 +153,7 @@ def _transform_point_for_position(curr_points, patient_position):
         "FFS": (-x * 10, -y * 10, z * 10),
     }
     tx, ty, tz = transform_map[patient_position]
-    return [tx, ty, tz]
+    return [tx + coordinate_shift[0], ty + coordinate_shift[1], tz + coordinate_shift[2]]
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +304,7 @@ def read_roi(ds, plan, skip_pattern):
     image_info = plan.primary_image.image_info
     frame_uid = image_info[0]["FrameUID"]
     patient_position = image_header["patient_position"]
+    coord_shift = plan.coordinate_shift  # (0,0,0) for v9+
 
     path_roi = os.path.join(plan.path, "plan.roi")
     plan.logger.debug("Will skip ROIs matching pattern[%s]", skip_pattern)
@@ -363,7 +367,7 @@ def read_roi(ds, plan, skip_pattern):
                     first_points = curr_points
 
                 transformed = _transform_point_for_position(
-                    curr_points, patient_position
+                    curr_points, patient_position, coord_shift
                 )
 
                 # Round the very first point for numerical stability

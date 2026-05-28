@@ -335,6 +335,7 @@ def convert_dose(plan, export_path):
 
     # --- Dose origin sign convention ---
     x_sign, y_sign, z_sign = _DOSE_ORIGIN_SIGNS[patient_position]
+    coord_shift = plan.coordinate_shift  # (0,0,0) for v9+
 
     # --- Process each trial ---
     for trial_info in plan.trials:
@@ -347,9 +348,9 @@ def convert_dose(plan, export_path):
         series_uid = uids["series_dose"]
 
         dose_origin = [
-            x_sign * _get_dose_grid_value(trial_info, "X", "Origin") * 10,
-            y_sign * _get_dose_grid_value(trial_info, "Y", "Origin") * 10,
-            z_sign * _get_dose_grid_value(trial_info, "Z", "Origin") * 10,
+            x_sign * _get_dose_grid_value(trial_info, "X", "Origin") * 10 + coord_shift[0],
+            y_sign * _get_dose_grid_value(trial_info, "Y", "Origin") * 10 + coord_shift[1],
+            z_sign * _get_dose_grid_value(trial_info, "Z", "Origin") * 10 + coord_shift[2],
         ]
 
         # Determine TissueHeterogeneityCorrection for this trial.
