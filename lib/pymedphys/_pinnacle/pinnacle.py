@@ -160,8 +160,7 @@ class PinnacleExport:
             dobstr = self._patient_info.get("DateOfBirth", "")
             dob = ""
             if dobstr:
-                for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d %m %Y",
-                            "%Y%m%d"):
+                for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d %m %Y", "%Y%m%d"):
                     try:
                         dob = _dt.strptime(dobstr.strip(), fmt).strftime("%Y%m%d")
                         break
@@ -171,6 +170,7 @@ class PinnacleExport:
                 if not dob:
                     # Fallback: strip non-digits and hope for the best
                     import re as _re
+
                     digits = _re.sub(r"\D", "", dobstr)
                     if len(digits) == 8:
                         dob = digits

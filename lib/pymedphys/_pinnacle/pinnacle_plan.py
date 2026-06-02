@@ -187,9 +187,7 @@ class PinnaclePlan:
             try:
                 self._machine_info = pinn_to_dict(path_machine)
             except Exception as exc:
-                self.logger.warning(
-                    "Failed to parse plan.Pinnacle.Machines: %s", exc
-                )
+                self.logger.warning("Failed to parse plan.Pinnacle.Machines: %s", exc)
                 return None
 
         return self._machine_info
@@ -221,7 +219,8 @@ class PinnaclePlan:
             except Exception as exc:
                 self.logger.warning(
                     "Failed to parse plan.Trial at %s: %s — no trials available",
-                    path_trial, exc,
+                    path_trial,
+                    exc,
                 )
                 self._trials = []
                 return self._trials
@@ -344,7 +343,8 @@ class PinnaclePlan:
             except Exception as exc:
                 self.logger.warning(
                     "Failed to parse plan.Points at %s: %s — using empty points list",
-                    path_points, exc,
+                    path_points,
+                    exc,
                 )
                 self._points = []
                 return self._points
@@ -380,7 +380,8 @@ class PinnaclePlan:
                 except Exception as exc:
                     self.logger.warning(
                         "Failed to parse plan.PatientSetup at %s: %s",
-                        setup_path, exc,
+                        setup_path,
+                        exc,
                     )
                     self._patient_setup = None
 
@@ -391,7 +392,8 @@ class PinnaclePlan:
                     if pos:
                         self.logger.info(
                             "plan.PatientSetup missing — using image header "
-                            "patient_position: %s", pos,
+                            "patient_position: %s",
+                            pos,
                         )
                         return pos
                 self.logger.warning(
@@ -414,15 +416,9 @@ class PinnaclePlan:
             pat_pos = f"{pat_pos}S"
         elif "prone" in position:
             pat_pos = f"{pat_pos}P"
-        elif (
-            "decubitus right" in position
-            or "Decuibitus Right" in position
-        ):
+        elif "decubitus right" in position or "Decuibitus Right" in position:
             pat_pos = f"{pat_pos}DR"
-        elif (
-            "decubitus left" in position
-            or "Decuibitus Left" in position
-        ):
+        elif "decubitus left" in position or "Decuibitus Left" in position:
             pat_pos = f"{pat_pos}DL"
 
         return pat_pos
@@ -531,7 +527,8 @@ class PinnaclePlan:
         except (KeyError, ValueError, TypeError) as exc:
             self.logger.warning(
                 "Cannot read header fields for coordinate shift (%s). "
-                "Assuming zero shift.", exc,
+                "Assuming zero shift.",
+                exc,
             )
             self._coordinate_shift_cache = shift
             return shift
@@ -565,7 +562,8 @@ class PinnaclePlan:
         else:
             self.logger.warning(
                 "Unsupported patient position '%s' for coordinate shift "
-                "calculation — assuming zero shift.", patient_position,
+                "calculation — assuming zero shift.",
+                patient_position,
             )
             self._coordinate_shift_cache = shift
             return shift
@@ -578,16 +576,19 @@ class PinnaclePlan:
 
         if shift == (0.0, 0.0, 0.0):
             self.logger.debug(
-                "Pre-v9 coordinate shift is zero (version: %s, "
-                "position: %s).", version_desc or "unknown",
+                "Pre-v9 coordinate shift is zero (version: %s, " "position: %s).",
+                version_desc or "unknown",
                 patient_position,
             )
         else:
             self.logger.info(
                 "Pre-v9 coordinate shift computed (version: %s, "
                 "position: %s): x=%.3f mm, y=%.3f mm, z=%.3f mm",
-                version_desc or "unknown", patient_position,
-                shift[0], shift[1], shift[2],
+                version_desc or "unknown",
+                patient_position,
+                shift[0],
+                shift[1],
+                shift[2],
             )
 
         self._coordinate_shift_cache = shift
@@ -727,7 +728,10 @@ class PinnaclePlan:
 
         self.logger.debug(
             "Trial '%s' UIDs - plan: %s, dose: %s, struct: %s",
-            trial_info["Name"], plan_uid, dose_uid, struct_uid,
+            trial_info["Name"],
+            plan_uid,
+            dose_uid,
+            struct_uid,
         )
 
         uids = {

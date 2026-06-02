@@ -216,7 +216,11 @@ def classify_trial(plan_info, trial_info, total_trials):
     a reference/QA trial when in fact we just can't confirm it's
     clinical.
     """
-    return "clinical" if is_clinical_trial(plan_info, trial_info, total_trials) else "unknown"
+    return (
+        "clinical"
+        if is_clinical_trial(plan_info, trial_info, total_trials)
+        else "unknown"
+    )
 
 
 def build_pinnacle_metadata_suffix(plan_info, trial_info, total_trials):
@@ -247,8 +251,9 @@ def build_pinnacle_metadata_suffix(plan_info, trial_info, total_trials):
     return f"Pinnacle: {lock_summary}; {classification}"
 
 
-def append_pinnacle_metadata(existing_description, plan_info, trial_info, total_trials,
-                             max_length=_DICOM_ST_MAX):
+def append_pinnacle_metadata(
+    existing_description, plan_info, trial_info, total_trials, max_length=_DICOM_ST_MAX
+):
     """Append the Pinnacle metadata suffix to an existing description.
 
     Preserves whatever the description already held (typically the patient
@@ -312,8 +317,9 @@ def build_pinnacle_metadata_suffix_for_plan(plan, trial_info):
     )
 
 
-def append_pinnacle_metadata_for_plan(existing_description, plan, trial_info,
-                                      max_length=_DICOM_ST_MAX):
+def append_pinnacle_metadata_for_plan(
+    existing_description, plan, trial_info, max_length=_DICOM_ST_MAX
+):
     """:func:`append_pinnacle_metadata` with automatic lookup."""
     suffix = build_pinnacle_metadata_suffix_for_plan(plan, trial_info)
     base = (existing_description or "").strip()
@@ -350,8 +356,9 @@ def _join_with_sep(base, suffix, sep=_EQUIPMENT_SEP):
     return base or suffix
 
 
-def apply_equipment_stamps(ds, equipment_cfg, pinnacle_model="",
-                           pinnacle_sw="", sep=_EQUIPMENT_SEP):
+def apply_equipment_stamps(
+    ds, equipment_cfg, pinnacle_model="", pinnacle_sw="", sep=_EQUIPMENT_SEP
+):
     """Set the four DICOM General Equipment tags on *ds*.
 
     Composes each field from a Pinnacle-originated base value and a
@@ -423,12 +430,12 @@ def apply_equipment_stamps(ds, equipment_cfg, pinnacle_model="",
 
 # Modality indices — arbitrary but fixed per DICOM object type.
 UID_MODALITY_INDEX = {
-    "struct":        "001",  # RTSTRUCT
-    "plan":          "002",  # RTPLAN
-    "dose":          "003",  # RTDOSE
+    "struct": "001",  # RTSTRUCT
+    "plan": "002",  # RTPLAN
+    "dose": "003",  # RTDOSE
     "series_struct": "004",  # Series UID for RTSTRUCT
-    "series_plan":   "005",  # Series UID for RTPLAN
-    "series_dose":   "006",  # Series UID for RTDOSE
+    "series_plan": "005",  # Series UID for RTPLAN
+    "series_dose": "006",  # Series UID for RTDOSE
 }
 
 

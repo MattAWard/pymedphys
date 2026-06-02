@@ -59,24 +59,24 @@ def _sanitise_line(line):
 
     # If the line contains a key = value or key : value assignment,
     # ensure the value portion is safe for YAML.
-    m = re.match(r'^(\s*\S+\s*:\s*)(.*)', line)
+    m = re.match(r"^(\s*\S+\s*:\s*)(.*)", line)
     if m:
         prefix, value = m.group(1), m.group(2)
-        value = value.rstrip(';').strip()
+        value = value.rstrip(";").strip()
         if value:
             # Quote the value if it contains YAML-hostile characters and
             # isn't already quoted.
             needs_quoting = (
                 not (value.startswith('"') and value.endswith('"'))
                 and not (value.startswith("'") and value.endswith("'"))
-                and re.search(r'[:\\#\[\]{}]', value)
+                and re.search(r"[:\\#\[\]{}]", value)
             )
             if needs_quoting:
                 # Escape existing double-quotes inside the value
-                escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
                 line = f'{prefix}"{escaped}"'
             else:
-                line = f'{prefix}{value}'
+                line = f"{prefix}{value}"
         else:
             line = prefix
 
@@ -94,7 +94,7 @@ def _fallback_parse(data_lines):
     points, etc.) without crashing.
     """
     result = {}
-    stack = [result]    # stack of dicts/lists being built
+    stack = [result]  # stack of dicts/lists being built
     list_depths = set()
 
     for raw_line in data_lines:
@@ -102,19 +102,19 @@ def _fallback_parse(data_lines):
 
         # Skip empty, comment open/close, and closing braces that
         # just terminate blocks.
-        if not line or line.startswith('/*') or line.startswith('*/'):
+        if not line or line.startswith("/*") or line.startswith("*/"):
             continue
-        if line == '};' or line == '}':
+        if line == "};" or line == "}":
             if len(stack) > 1:
                 stack.pop()
             continue
 
         # Block opener: "Key ={" or "Key = {"
-        m = re.match(r'^(\S+)\s*=\s*\{', line)
+        m = re.match(r"^(\S+)\s*=\s*\{", line)
         if m:
             key = m.group(1)
             indent = len(raw_line) - len(raw_line.lstrip())
-            if 'Array' in key or 'List' in key:
+            if "Array" in key or "List" in key:
                 list_depths.add(indent)
                 new_list = []
                 if isinstance(stack[-1], dict):
@@ -130,7 +130,7 @@ def _fallback_parse(data_lines):
             continue
 
         # Simple assignment: "Key = Value;"
-        m = re.match(r'^(\S+)\s*=\s*(.*?)\s*;?\s*$', line)
+        m = re.match(r"^(\S+)\s*=\s*(.*?)\s*;?\s*$", line)
         if m:
             key, val = m.group(1), m.group(2)
             # Strip surrounding quotes
@@ -187,7 +187,9 @@ def pinn_to_dict(filename):
                 logger.warning(
                     "YAML parse failed for '%s' (segment %d): %s — "
                     "attempting sanitised re-parse",
-                    filename, i, exc,
+                    filename,
+                    i,
+                    exc,
                 )
                 try:
                     sanitised = [_sanitise_line(l) for l in split_data]
@@ -197,7 +199,9 @@ def pinn_to_dict(filename):
                     logger.warning(
                         "Sanitised YAML parse also failed for '%s' (segment %d): %s — "
                         "falling back to line-by-line parser",
-                        filename, i, exc2,
+                        filename,
+                        i,
+                        exc2,
                     )
                     d = _fallback_parse(split_data)
 

@@ -66,10 +66,10 @@ _SLICE_Z_SIGN = {
 # the four standard positions, this reduces to a sign lookup.
 _IPP_XY_SIGN = {
     #          (x_sign, y_sign)
-    "HFS":  (-1, -1),
-    "HFP":  (+1, +1),
-    "FFS":  (+1, -1),
-    "FFP":  (-1, +1),
+    "HFS": (-1, -1),
+    "HFP": (+1, +1),
+    "FFS": (+1, -1),
+    "FFP": (-1, +1),
 }
 
 # This function will create dicom image files for each slice using the
@@ -117,17 +117,23 @@ def create_image_files(image, export_path):
         pass  # Incase it is not present in header
 
     img_file = os.path.join(image.path, f"ImageSet_{image.image['ImageSetID']}.img")
-    if os.path.isfile(img_file):
-        allframeslist = []
-        pixel_array = np.fromfile(img_file, dtype=np.short)
-        # will loop over every frame
-        for i in range(0, int(image_header["z_dim"])):
-            frame_array = pixel_array[
-                i * int(image_header["x_dim"]) * int(image_header["y_dim"]) : (i + 1)
-                * int(image_header["x_dim"])
-                * int(image_header["y_dim"])
-            ]
-            allframeslist.append(frame_array)
+    if not os.path.isfile(img_file):
+        image.logger.error(
+            "Cannot create image files: raw image binary not found at %s",
+            img_file,
+        )
+        return
+
+    allframeslist = []
+    pixel_array = np.fromfile(img_file, dtype=np.short)
+    # will loop over every frame
+    for i in range(0, int(image_header["z_dim"])):
+        frame_array = pixel_array[
+            i * int(image_header["x_dim"]) * int(image_header["y_dim"]) : (i + 1)
+            * int(image_header["x_dim"])
+            * int(image_header["y_dim"])
+        ]
+        allframeslist.append(frame_array)
     image.logger.debug("Length of frames list: %s", len(allframeslist))
     image.logger.debug(image_info[0])
 
@@ -231,10 +237,11 @@ def create_image_files(image, export_path):
             # Unknown orientation — default to HFS and log a warning
             image.logger.warning(
                 "Unknown patient position '%s' — defaulting ImageOrientationPatient "
-                "to HFS", currentpatientposition,
+                "to HFS",
+                currentpatientposition,
             )
             ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-        ds.PositionReferenceIndicator = "LM"  # ???
+        ds.PositionReferenceIndicator = ""  # Type 2; left empty unless known
         ds.SliceLocation = sliceloc
         ds.SamplesPerPixel = 1
         ds.PhotometricInterpretation = "MONOCHROME2"
@@ -245,7 +252,16 @@ def create_image_files(image, export_path):
             float(image_header["y_pixdim"]) * 10,
         ]
 
-        ds.PixelData = allframeslist[curframe].tostring()
+        if curframe >= len(allframeslist):
+            image.logger.error(
+                "Frame index %d exceeds the %d frames decoded from the image "
+                "binary; stopping image creation early. The slice count and "
+                "binary frame count are inconsistent.",
+                curframe,
+                len(allframeslist),
+            )
+            break
+        ds.PixelData = allframeslist[curframe].tobytes()
 
         output_file = os.path.join(export_path, image_file_name)
         image.logger.info("Creating image: %s", output_file)

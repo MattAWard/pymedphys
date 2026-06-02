@@ -61,6 +61,7 @@ from .pinnacle_metadata import apply_equipment_stamps
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _new_dataset():
     """Shorthand for creating a new empty DICOM Dataset."""
     return pydicom.dataset.Dataset()
@@ -112,7 +113,7 @@ def _find_closest_slice(image_info_list, z_coord_mm, patient_position="HFS"):
         else:
             pinnacle_z_cm = -z_coord_mm / 10
         distance = abs(float(s["TablePosition"]) - pinnacle_z_cm)
-        if distance <= closest_distance:
+        if distance < closest_distance:
             closest_distance = distance
             closest_uid = s["InstanceUID"]
 
@@ -123,7 +124,9 @@ def _find_closest_slice(image_info_list, z_coord_mm, patient_position="HFS"):
     return contour_image
 
 
-def _transform_point_for_position(curr_points, patient_position, coordinate_shift=(0.0, 0.0, 0.0)):
+def _transform_point_for_position(
+    curr_points, patient_position, coordinate_shift=(0.0, 0.0, 0.0)
+):
     """Transform ROI contour points from Pinnacle coordinates to DICOM patient coords.
 
     Pinnacle stores coordinates in cm; DICOM uses mm. The sign conventions
@@ -152,13 +155,23 @@ def _transform_point_for_position(curr_points, patient_position, coordinate_shif
         "FFP": (x * 10, y * 10, z * 10),
         "FFS": (-x * 10, -y * 10, z * 10),
     }
+    if patient_position not in transform_map:
+        raise NotImplementedError(
+            f"{patient_position} orientation is not supported for structure "
+            f"coordinate transforms. Supported: {tuple(transform_map)}."
+        )
     tx, ty, tz = transform_map[patient_position]
-    return [tx + coordinate_shift[0], ty + coordinate_shift[1], tz + coordinate_shift[2]]
+    return [
+        tx + coordinate_shift[0],
+        ty + coordinate_shift[1],
+        tz + coordinate_shift[2],
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Isocenter detection
 # ---------------------------------------------------------------------------
+
 
 def find_iso_center(plan):
     """Determine the isocenter, CT centre and dose reference point for the plan.
@@ -178,22 +191,22 @@ def find_iso_center(plan):
     for point in plan.points:
         refpoint = plan.convert_point(point)
 
-        # Check for isocenter by name
-        name = point["Name"]
-        if any(tag in name for tag in ("Iso", "isocenter", "isocentre", "ISO")):
+        # Check for isocenter by name (case-insensitive)
+        name_l = point["Name"].lower()
+        if any(tag in name_l for tag in ("iso", "isocenter", "isocentre")):
             iso_center = refpoint
 
-        # Check for CT center
-        if any(tag in name for tag in ("CT Center", "ct center", "ct centre")):
+        # Check for CT center (case-insensitive)
+        if "ct center" in name_l or "ct centre" in name_l:
             ct_center = refpoint
 
-        # Check for dose reference point
-        if "drp" in name or "DRP" in name:
+        # Check for dose reference point (case-insensitive)
+        if "drp" in name_l:
             dose_ref_pt = refpoint
 
-        # Highest priority: explicit PoiInterpretedType
+        # Highest priority: explicit PoiInterpretedType (case-insensitive)
         if "PoiInterpretedType" in point:
-            if "ISO" in point["PoiInterpretedType"]:
+            if "iso" in point["PoiInterpretedType"].lower():
                 iso_center = refpoint
                 plan.logger.debug("ISO Center located: %s", iso_center)
 
@@ -210,9 +223,10 @@ def find_iso_center(plan):
         point_with_iso = []
 
         for p in plan.points:
-            if "center" in p["Name"]:
+            pname_l = p["Name"].lower()
+            if "center" in pname_l or "centre" in pname_l:
                 point_with_center = p["refpoint"]
-            elif "iso" in p["Name"]:
+            elif "iso" in pname_l:
                 point_with_iso = p["refpoint"]
 
         if len(point_with_center) > 1:
@@ -232,6 +246,7 @@ def find_iso_center(plan):
 # ---------------------------------------------------------------------------
 # Points → DICOM
 # ---------------------------------------------------------------------------
+
 
 def read_points(ds, plan):
     """Read plan points (POIs) and add them to the DICOM dataset.
@@ -254,7 +269,14 @@ def read_points(ds, plan):
         # --- ROI Contour ---
         roi_contour = _new_dataset()
         roi_contour.ReferencedROINumber = str(plan.roi_count)
-        roi_contour.ROIDisplayColor = colors[point["Color"]]
+        try:
+            roi_contour.ROIDisplayColor = colors[point["Color"]]
+        except KeyError:
+            plan.logger.info(
+                "POI color not known: %s — assigning a random color",
+                point.get("Color"),
+            )
+            roi_contour.ROIDisplayColor = colors[random.choice(list(colors))]
         roi_contour.ContourSequence = _new_sequence()
 
         contour = _new_dataset()
@@ -293,6 +315,7 @@ def read_points(ds, plan):
 # ROI contours → DICOM (line-by-line parser for plan.roi)
 # ---------------------------------------------------------------------------
 
+
 def read_roi(ds, plan, skip_pattern):
     """Read ROI contours from the plan.roi file and add to the DICOM dataset.
 
@@ -311,8 +334,9 @@ def read_roi(ds, plan, skip_pattern):
     plan.logger.debug("Reading ROI from: %s", path_roi)
 
     if not os.path.exists(path_roi):
-        plan.logger.warning("plan.roi not found at: %s — no ROI contours to export",
-                            path_roi)
+        plan.logger.warning(
+            "plan.roi not found at: %s — no ROI contours to export", path_roi
+        )
         return ds
 
     # State variables for the line-by-line parser
@@ -454,9 +478,9 @@ def read_roi(ds, plan, skip_pattern):
             # ----- Number of points in current curve -----
             if "num_points =" in line:
                 npts = re.findall(r"[-+]?\d*\.\d+|\d+", line)[0]
-                contour_item = ds.ROIContourSequence[plan.roi_count - 1].ContourSequence[
-                    int(curvenum) - 1
-                ]
+                contour_item = ds.ROIContourSequence[
+                    plan.roi_count - 1
+                ].ContourSequence[int(curvenum) - 1]
                 contour_item.ContourGeometricType = "CLOSED_PLANAR"
                 contour_item.NumberOfContourPoints = npts
 
@@ -471,6 +495,7 @@ def read_roi(ds, plan, skip_pattern):
 # ---------------------------------------------------------------------------
 # Top-level entry points
 # ---------------------------------------------------------------------------
+
 
 def convert_struct(plan, export_path, skip_pattern):
     """Export RTSTRUCT files for every trial in the plan.
@@ -504,7 +529,12 @@ def convert_struct(plan, export_path, skip_pattern):
 
 
 def convert_struct_for_trial(
-    plan, trial_info, struct_instance_uid, series_instance_uid, export_path, skip_pattern
+    plan,
+    trial_info,
+    struct_instance_uid,
+    series_instance_uid,
+    export_path,
+    skip_pattern,
 ):
     """Write a single RTSTRUCT DICOM file for one specific trial."""
 
@@ -547,7 +577,8 @@ def convert_struct_for_trial(
 
     # Apply site-specific equipment identification stamps from config
     apply_equipment_stamps(
-        ds, plan.pinnacle.equipment_cfg,
+        ds,
+        plan.pinnacle.equipment_cfg,
         pinnacle_model=plan_info.get("ToolType", ""),
         pinnacle_sw=plan_info.get("PinnacleVersionDescription", ""),
     )
