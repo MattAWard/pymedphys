@@ -61,6 +61,7 @@ from .pinnacle_metadata import apply_equipment_stamps
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _new_dataset():
     """Shorthand for creating a new empty DICOM Dataset."""
     return pydicom.dataset.Dataset()
@@ -123,7 +124,9 @@ def _find_closest_slice(image_info_list, z_coord_mm, patient_position="HFS"):
     return contour_image
 
 
-def _transform_point_for_position(curr_points, patient_position, coordinate_shift=(0.0, 0.0, 0.0)):
+def _transform_point_for_position(
+    curr_points, patient_position, coordinate_shift=(0.0, 0.0, 0.0)
+):
     """Transform ROI contour points from Pinnacle coordinates to DICOM patient coords.
 
     Pinnacle stores coordinates in cm; DICOM uses mm. The sign conventions
@@ -158,12 +161,17 @@ def _transform_point_for_position(curr_points, patient_position, coordinate_shif
             f"coordinate transforms. Supported: {tuple(transform_map)}."
         )
     tx, ty, tz = transform_map[patient_position]
-    return [tx + coordinate_shift[0], ty + coordinate_shift[1], tz + coordinate_shift[2]]
+    return [
+        tx + coordinate_shift[0],
+        ty + coordinate_shift[1],
+        tz + coordinate_shift[2],
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Isocenter detection
 # ---------------------------------------------------------------------------
+
 
 def find_iso_center(plan):
     """Determine the isocenter, CT centre and dose reference point for the plan.
@@ -239,6 +247,7 @@ def find_iso_center(plan):
 # Points → DICOM
 # ---------------------------------------------------------------------------
 
+
 def read_points(ds, plan):
     """Read plan points (POIs) and add them to the DICOM dataset.
 
@@ -306,6 +315,7 @@ def read_points(ds, plan):
 # ROI contours → DICOM (line-by-line parser for plan.roi)
 # ---------------------------------------------------------------------------
 
+
 def read_roi(ds, plan, skip_pattern):
     """Read ROI contours from the plan.roi file and add to the DICOM dataset.
 
@@ -324,8 +334,9 @@ def read_roi(ds, plan, skip_pattern):
     plan.logger.debug("Reading ROI from: %s", path_roi)
 
     if not os.path.exists(path_roi):
-        plan.logger.warning("plan.roi not found at: %s — no ROI contours to export",
-                            path_roi)
+        plan.logger.warning(
+            "plan.roi not found at: %s — no ROI contours to export", path_roi
+        )
         return ds
 
     # State variables for the line-by-line parser
@@ -467,9 +478,9 @@ def read_roi(ds, plan, skip_pattern):
             # ----- Number of points in current curve -----
             if "num_points =" in line:
                 npts = re.findall(r"[-+]?\d*\.\d+|\d+", line)[0]
-                contour_item = ds.ROIContourSequence[plan.roi_count - 1].ContourSequence[
-                    int(curvenum) - 1
-                ]
+                contour_item = ds.ROIContourSequence[
+                    plan.roi_count - 1
+                ].ContourSequence[int(curvenum) - 1]
                 contour_item.ContourGeometricType = "CLOSED_PLANAR"
                 contour_item.NumberOfContourPoints = npts
 
@@ -484,6 +495,7 @@ def read_roi(ds, plan, skip_pattern):
 # ---------------------------------------------------------------------------
 # Top-level entry points
 # ---------------------------------------------------------------------------
+
 
 def convert_struct(plan, export_path, skip_pattern):
     """Export RTSTRUCT files for every trial in the plan.
@@ -517,7 +529,12 @@ def convert_struct(plan, export_path, skip_pattern):
 
 
 def convert_struct_for_trial(
-    plan, trial_info, struct_instance_uid, series_instance_uid, export_path, skip_pattern
+    plan,
+    trial_info,
+    struct_instance_uid,
+    series_instance_uid,
+    export_path,
+    skip_pattern,
 ):
     """Write a single RTSTRUCT DICOM file for one specific trial."""
 
@@ -560,7 +577,8 @@ def convert_struct_for_trial(
 
     # Apply site-specific equipment identification stamps from config
     apply_equipment_stamps(
-        ds, plan.pinnacle.equipment_cfg,
+        ds,
+        plan.pinnacle.equipment_cfg,
         pinnacle_model=plan_info.get("ToolType", ""),
         pinnacle_sw=plan_info.get("PinnacleVersionDescription", ""),
     )

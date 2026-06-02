@@ -66,10 +66,10 @@ _SLICE_Z_SIGN = {
 # the four standard positions, this reduces to a sign lookup.
 _IPP_XY_SIGN = {
     #          (x_sign, y_sign)
-    "HFS":  (-1, -1),
-    "HFP":  (+1, +1),
-    "FFS":  (+1, -1),
-    "FFP":  (-1, +1),
+    "HFS": (-1, -1),
+    "HFP": (+1, +1),
+    "FFS": (+1, -1),
+    "FFP": (-1, +1),
 }
 
 # This function will create dicom image files for each slice using the
@@ -237,7 +237,8 @@ def create_image_files(image, export_path):
             # Unknown orientation — default to HFS and log a warning
             image.logger.warning(
                 "Unknown patient position '%s' — defaulting ImageOrientationPatient "
-                "to HFS", currentpatientposition,
+                "to HFS",
+                currentpatientposition,
             )
             ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         ds.PositionReferenceIndicator = ""  # Type 2; left empty unless known
@@ -256,7 +257,8 @@ def create_image_files(image, export_path):
                 "Frame index %d exceeds the %d frames decoded from the image "
                 "binary; stopping image creation early. The slice count and "
                 "binary frame count are inconsistent.",
-                curframe, len(allframeslist),
+                curframe,
+                len(allframeslist),
             )
             break
         ds.PixelData = allframeslist[curframe].tobytes()

@@ -200,7 +200,11 @@ class PinnacleImage:
             # ScanTimeFromScanner is expected as "YYYY-MM-DD HH:MM:SS" but
             # older archives may have it missing, empty, or in a different
             # format (e.g. date-only, or a Unix timestamp).
-            scan_ts = self._image_set.get("ScanTimeFromScanner", "") if self._image_set else ""
+            scan_ts = (
+                self._image_set.get("ScanTimeFromScanner", "")
+                if self._image_set
+                else ""
+            )
             if scan_ts and " " in str(scan_ts):
                 parts = str(scan_ts).split(" ", 1)
                 self._image_set["scan_date"] = parts[0].replace("-", "")
@@ -208,15 +212,19 @@ class PinnacleImage:
             else:
                 # Best-effort: strip non-digits from whatever we have
                 import re as _re
+
                 digits = _re.sub(r"\D", "", str(scan_ts)) if scan_ts else ""
                 # If ≥8 digits, assume first 8 are date, rest are time
                 if len(digits) >= 8:
                     self._image_set["scan_date"] = digits[:8]
-                    self._image_set["scan_time"] = digits[8:14] if len(digits) > 8 else ""
+                    self._image_set["scan_time"] = (
+                        digits[8:14] if len(digits) > 8 else ""
+                    )
                 else:
                     self.logger.warning(
                         "ScanTimeFromScanner is missing or unparseable: '%s' "
-                        "— using empty date/time", scan_ts,
+                        "— using empty date/time",
+                        scan_ts,
                     )
                     self._image_set["scan_date"] = ""
                     self._image_set["scan_time"] = ""
