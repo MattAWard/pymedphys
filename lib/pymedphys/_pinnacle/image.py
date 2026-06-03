@@ -44,7 +44,7 @@ from pymedphys._imports import numpy as np
 from pymedphys._imports import pydicom
 
 from .constants import GImplementationClassUID, GTransferSyntaxUID
-from .pinnacle_metadata import apply_equipment_stamps
+from .pinnacle_metadata import apply_equipment_stamps, generate_pinn2dicom_uid
 from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
 
 # Slice location sign: for head-first orientations DICOM z = -TablePosition,
@@ -136,6 +136,42 @@ def create_image_files(image, export_path):
         allframeslist.append(frame_array)
     image.logger.debug("Length of frames list: %s", len(allframeslist))
     image.logger.debug(image_info[0])
+
+    # The Pinnacle ImageInfo UIDs are internal identifiers that can collide
+    # across patients when they share the same CT scan in Pinnacle.  On the
+    # reconstructed-image path (no original DICOM) we generate fresh, unique
+    # DICOM UIDs — using the same Pinn2Dicom algorithm / UID_ROOT that the
+    # RT objects use when DICOM_EQUIPMENT.UID_ROOT is configured, or falling
+    # back to pydicom's random generator otherwise.
+    #
+    # Updating the image_info dicts in place ensures that RT objects
+    # (RTDOSE/RTPLAN/RTSTRUCT), which read UIDs via
+    # plan.primary_image.image_info, automatically reference the new values.
+    uid_root = getattr(image.pinnacle, "equipment_cfg", {}).get("UID_ROOT", "")
+
+    if uid_root:
+        new_study_uid = generate_pinn2dicom_uid(uid_root, "study")
+        new_series_uid = generate_pinn2dicom_uid(uid_root, "series_ct")
+        new_frame_uid = generate_pinn2dicom_uid(uid_root, "frame")
+    else:
+        new_study_uid = pydicom.uid.generate_uid()
+        new_series_uid = pydicom.uid.generate_uid()
+        new_frame_uid = pydicom.uid.generate_uid()
+
+    for info in image_info:
+        if uid_root:
+            info["InstanceUID"] = generate_pinn2dicom_uid(uid_root, "ct")
+        else:
+            info["InstanceUID"] = pydicom.uid.generate_uid()
+        info["StudyInstanceUID"] = new_study_uid
+        info["SeriesUID"] = new_series_uid
+        info["FrameUID"] = new_frame_uid
+
+    image.logger.info(
+        "Generated fresh DICOM UIDs for reconstructed images "
+        "(root=%s) — StudyInstanceUID: %s, SeriesInstanceUID: %s",
+        uid_root or "pydicom-random", new_study_uid, new_series_uid,
+    )
 
     curframe = 0
     z_sign = _SLICE_Z_SIGN.get(currentpatientposition, -1)

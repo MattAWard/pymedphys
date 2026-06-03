@@ -434,8 +434,12 @@ UID_MODALITY_INDEX = {
     "plan": "002",  # RTPLAN
     "dose": "003",  # RTDOSE
     "series_struct": "004",  # Series UID for RTSTRUCT
-    "series_plan": "005",  # Series UID for RTPLAN
-    "series_dose": "006",  # Series UID for RTDOSE
+    "series_plan":   "005",  # Series UID for RTPLAN
+    "series_dose":   "006",  # Series UID for RTDOSE
+    "study":         "007",  # StudyInstanceUID (shared across objects)
+    "ct":            "008",  # CT SOP Instance UID (per slice)
+    "series_ct":     "009",  # Series UID for CT
+    "frame":         "010",  # FrameOfReferenceUID
 }
 
 
