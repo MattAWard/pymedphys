@@ -44,6 +44,7 @@ import re
 import struct
 import time
 
+from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
 from pymedphys._imports import numpy as np
 from pymedphys._imports import pydicom
 from pymedphys._pinnacle.pinnacle_exceptions import (
@@ -51,8 +52,6 @@ from pymedphys._pinnacle.pinnacle_exceptions import (
     MissingCTImageError,
     MissingTrialBeamsError,
 )
-
-from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
 
 from .constants import (
     GImplementationClassUID,
@@ -62,7 +61,6 @@ from .constants import (
     RTPlanSOPClassUID,
 )
 from .pinnacle_metadata import apply_equipment_stamps
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -499,7 +497,7 @@ def _convert_dose_for_trial(
         raise MissingBeamDoseError(
             f"No usable beam dose accumulated for trial: {trial_name}"
         )
-
+    # TODO [IS-720] Check if any reasons for keeping only 14 bits, as Pinnacle exports on all 16 bits
     scale = max(summed_pixel_values) / 16384
     ds.DoseGridScaling = scale
     plan.logger.debug("Dose Grid Scaling: %s", scale)
@@ -629,7 +627,7 @@ def _sum_beam_doses(
                 beam["Name"],
                 len(binary_data),
                 expected_bytes,
-            )
+            )  # TODO [IS-721] Consider raising an error instead of warning, as this may indicate a mismatch in dose grid dimensions.
 
         # --- Prescription and scaling ---
         prescription = [
@@ -667,8 +665,14 @@ def _sum_beam_doses(
         plan.logger.debug("Total Prescription %s", total_prescription)
 
         # --- Read dose grid and compute beam MU ---
-        dose_grid = np.zeros((dim_x, dim_y, dim_z))
-        dose_grid = construct_dose_from_binary(binary_data, dose_grid)
+        """Each per-beam binary file stores the dose contribution from that beam expressed as dose per unit weight
+        — specifically, dose normalised to the beam's dose weight (also called beam weight or field weight), not dose per raw MU.
+        Pinnacle internally works with a dose weight system rather than directly with MUs during optimisation and storage.
+        """
+        dose_per_unit_weight_grid = np.zeros((dim_x, dim_y, dim_z))
+        dose_per_unit_weight_grid = construct_dose_from_binary(
+            binary_data, dose_per_unit_weight_grid
+        )
 
         spacing = [vx, vy, vz]
 
@@ -678,8 +682,8 @@ def _sum_beam_doses(
         # is mapped so that array z=Z-1 = first binary = Pinnacle origin,
         # array z=0 = last binary).  The net effect is:
         #
-        #   HFS/HFP: dose_grid[0,0,0] is at IPP_z → idx_z = 0 at IPP ✓
-        #   FFS/FFP: dose_grid[0,0,0] is at IPP_z + (Z-1)*vz (the far end
+        #   HFS/HFP: dose_per_unit_weight_grid[0,0,0] is at IPP_z → idx_z = 0 at IPP ✓
+        #   FFS/FFP: dose_per_unit_weight_grid[0,0,0] is at IPP_z + (Z-1)*vz (the far end
         #            from IPP) → idx_z needs a (Z-1) offset.
         #
         # The orientation_matrix handles x and y correctly for all
@@ -712,13 +716,14 @@ def _sum_beam_doses(
                 dims,
             )
 
-        cgy_mu = trilinear_interpolation(idx, dose_grid)
-        plan.logger.debug("cgy_mu: %s", cgy_mu)
+        cGy_per_unit_weight = trilinear_interpolation(idx, dose_per_unit_weight_grid)
+        plan.logger.debug("cGy_per_unit_weight: %s", cGy_per_unit_weight)
 
-        if cgy_mu != 0:
-            beam_mu = (total_prescription / cgy_mu) / num_fractions
+        if cGy_per_unit_weight != 0:
+            beam_weight = (total_prescription / cGy_per_unit_weight) / num_fractions
         else:
-            beam_mu = 0
+            # TODO [IS-722] Fail if PrescriptionDose is non-zero, carry on otherwise
+            beam_weight = 0
             plan.logger.warning(
                 "Interpolated dose at the prescription point for beam '%s' is "
                 "zero, so its monitor units cannot be derived; this beam will "
@@ -726,14 +731,19 @@ def _sum_beam_doses(
                 "prescription point lies within the beam's dose region.",
                 beam["Name"],
             )
-        plan.logger.debug("Beam MU: %s", beam_mu)
+        plan.logger.debug("Beam MU: %s", beam_weight)
 
         # --- Convert dose grid to pixel values ---
         pixel_data_list = []
         for z in range(dim_z - 1, -1, -1):
             for y in range(dim_y):
                 for x in range(dim_x):
-                    value = num_fractions * dose_grid[x, y, z] * beam_mu / 100
+                    value = (
+                        num_fractions
+                        * dose_per_unit_weight_grid[x, y, z]
+                        * beam_weight
+                        / 100
+                    )
                     pixel_data_list.append(value)
 
         # Reorder into DICOM frame order
@@ -755,4 +765,5 @@ def _sum_beam_doses(
             for i in range(len(summed_pixel_values)):
                 summed_pixel_values[i] += main_pix_array[i]
 
+    return summed_pixel_values
     return summed_pixel_values

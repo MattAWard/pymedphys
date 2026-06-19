@@ -43,19 +43,13 @@ import random
 import re
 import time
 
+from pymedphys._dicom.create import set_default_transfer_syntax
 from pymedphys._imports import pydicom
 from pymedphys._pinnacle.pinnacle_exceptions import MissingCTImageError
-from pymedphys._dicom.create import set_default_transfer_syntax
 
-from .constants import (
-    GImplementationClassUID,
-    GTransferSyntaxUID,
-    RTSTRUCTModality,
-    RTStructSOPClassUID,
-    colors,
-)
+from .constants import (GImplementationClassUID, GTransferSyntaxUID,
+                        RTSTRUCTModality, RTStructSOPClassUID, colors)
 from .pinnacle_metadata import apply_equipment_stamps
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -213,7 +207,7 @@ def find_iso_center(plan):
     # Fallback chain
     if len(iso_center) < 2:
         iso_center = ct_center
-        plan.logger.debug("Isocenter not located, setting to ct center: %s", iso_center)
+        plan.logger.debug("Isocenter not located, setting to CT center: %s", iso_center)
 
     if len(iso_center) < 2:
         plan.logger.debug(

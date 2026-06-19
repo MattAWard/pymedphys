@@ -57,7 +57,6 @@ from .constants import (
 )
 from .pinnacle_metadata import append_pinnacle_metadata_for_plan, apply_equipment_stamps
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -79,6 +78,7 @@ def _sanitize_for_filename(name):
 
 
 def _generate_leaf_position_boundaries():
+    # FIXME [IS-725] This is a hardcoded Varian-Millennium pattern. It should be derived from the Pinnacle machine data instead of being hardcoded.
     """Generate the standard 51-element Varian-style MLC leaf position boundaries.
 
     Boundaries go from -200 to +200 mm in a pattern of:
@@ -151,7 +151,7 @@ def _parse_wedge_info(cp_data, plan_logger):
         info["type"] = "DYNAMIC"
         if orientation_raw == "WedgeBottomToTop":
             info["name"] = f"{wedge_name_raw.upper()}{info['angle']}IN"
-            info["orientation"] = "0"  # TODO: confirm orientation mapping
+            info["orientation"] = "0"  # TODO confirm orientation mapping
         elif orientation_raw == "WedgeTopToBottom":
             info["name"] = f"{wedge_name_raw.upper()}{info['angle']}OUT"
             info["orientation"] = "180"
@@ -208,6 +208,7 @@ def _populate_beam_limiting_device_seq(beam_ds, p_count, logger=None):
     # never emit a fractional value such as "60.0".
     num_pairs = p_count // 2
     mlcx.NumberOfLeafJawPairs = num_pairs
+    # TODO [IS-725] This is a hardcoded Varian-Millennium pattern. It should be derived from the Pinnacle machine data instead of being hardcoded.
     mlcx.LeafPositionBoundaries = _LEAF_POSITION_BOUNDARIES
     # DICOM requires len(LeafPositionBoundaries) == NumberOfLeafJawPairs + 1.
     # The boundary table is a fixed Varian-Millennium pattern, so warn when the
@@ -377,7 +378,7 @@ def convert_plan(plan, export_path):
         plan.logger.error("No primary image found for plan. Unable to generate RTPLAN.")
         raise MissingCTImageError("Plan has no primary image associated with it.")
 
-    # TODO Fix the RTPLAN export functionality and remove this warning
+    # TODO [IS-724] Test the RTPLAN export functionality and remove this warning
     plan.logger.warning(
         "RTPLAN export functionality is currently not validated and not stable. "
         "Use with caution."
@@ -487,7 +488,7 @@ def convert_plan_for_trial(
     )
     ds.RTPlanDate = ds.StudyDate
     ds.RTPlanTime = ds.StudyTime
-    ds.PlanIntent = ""  # TODO: palliative/curative — find source
+    ds.PlanIntent = ""  # TODO palliative/curative — find source
     ds.RTPlanGeometry = "PATIENT"
 
     # --- Referenced Structure Set ---
@@ -497,7 +498,7 @@ def convert_plan_for_trial(
     ref_struct.ReferencedSOPInstanceUID = struct_instance_uid
     ds.ReferencedStructureSetSequence.append(ref_struct)
 
-    ds.ApprovalStatus = "UNAPPROVED"  # TODO: derive from trial file
+    ds.ApprovalStatus = "UNAPPROVED"  # TODO [IS-723] Check if defined in trial file
 
     # --- Fraction Group ---
     ds.FractionGroupSequence = _new_sequence()
@@ -548,6 +549,7 @@ def convert_plan_for_trial(
         beam_ds.TreatmentDeliveryType = "TREATMENT"
         beam_ds.ReferencedPatientSetupNumber = beam_count
         beam_ds.SourceAxisDistance = "1000"
+        # FIXME [IS-727] Make FinalCumulativeMetersetWeight equal to CumulativeMetersetWeight of last CP
         beam_ds.FinalCumulativeMetersetWeight = "1"
         beam_ds.PrimaryDosimeterUnit = "MU"
 
@@ -616,6 +618,7 @@ def convert_plan_for_trial(
         gantryangle = colangle = psupportangle = 0
         wedge_info = None
 
+        # TODO [IS-726] This loop is in the wrong place. It should be inside the control point builders, not here. The jaw positions and leaf positions should be extracted per control point, not just once for the beam.
         for cp_data in cp_manager["ControlPointList"]:
             metersetweight.append(cp_data["Weight"])
 
@@ -969,4 +972,5 @@ def _build_non_ss_control_points(
             dose_ref.ReferencedDoseReferenceNumber = "1"
 
     # Beam Limiting Device Sequence (beam level)
+    _populate_beam_limiting_device_seq(beam_ds, p_count, plan.logger)
     _populate_beam_limiting_device_seq(beam_ds, p_count, plan.logger)

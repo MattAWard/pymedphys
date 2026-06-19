@@ -40,12 +40,12 @@
 
 import os
 
+from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
 from pymedphys._imports import numpy as np
 from pymedphys._imports import pydicom
 
 from .constants import GImplementationClassUID, GTransferSyntaxUID
 from .pinnacle_metadata import apply_equipment_stamps, generate_pinn2dicom_uid
-from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
 
 # Slice location sign: for head-first orientations DICOM z = -TablePosition,
 # for feet-first DICOM z = +TablePosition. TablePosition is in cm; DICOM in mm.
@@ -170,7 +170,9 @@ def create_image_files(image, export_path):
     image.logger.info(
         "Generated fresh DICOM UIDs for reconstructed images "
         "(root=%s) — StudyInstanceUID: %s, SeriesInstanceUID: %s",
-        uid_root or "pydicom-random", new_study_uid, new_series_uid,
+        uid_root or "pydicom-random",
+        new_study_uid,
+        new_series_uid,
     )
 
     curframe = 0
@@ -281,8 +283,8 @@ def create_image_files(image, export_path):
         ds.SliceLocation = sliceloc
         ds.SamplesPerPixel = 1
         ds.PhotometricInterpretation = "MONOCHROME2"
-        ds.Rows = int(image_header["x_dim"])
-        ds.Columns = int(image_header["y_dim"])
+        ds.Rows = int(image_header["y_dim"])
+        ds.Columns = int(image_header["x_dim"])
         ds.PixelSpacing = [
             float(image_header["x_pixdim"]) * 10,
             float(image_header["y_pixdim"]) * 10,
@@ -370,4 +372,5 @@ def convert_image(image, export_path):
         )
 
         imageds.save_as(output_file, enforce_file_format=True)
+        image.logger.info("Exported: %s to %s", file, output_file)
         image.logger.info("Exported: %s to %s", file, output_file)

@@ -429,6 +429,7 @@ def apply_equipment_stamps(
 # of the application (web server or CLI).
 
 # Modality indices — arbitrary but fixed per DICOM object type.
+# FIXME - these are not ideal, if mod. X is .00n, then series_X is .10n. Bertter this way. CT should be first
 UID_MODALITY_INDEX = {
     "struct": "001",  # RTSTRUCT
     "plan": "002",  # RTPLAN

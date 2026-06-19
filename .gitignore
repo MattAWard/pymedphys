@@ -288,3 +288,5 @@ scratch/
 .devcontainer/*
 .venv*
 .DS_Store
+csc-pinnacle-pymedphys.code-workspace
+lib/pymedphys/csc-pinn3-pymedphys.code-workspace
