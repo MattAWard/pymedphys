@@ -38,7 +38,12 @@
 # SOFTWARE.
 
 
-GTransferSyntaxUID = "1.2.840.10008.1.2"
+# Explicit VR Little Endian.  Previously Implicit VR LE ("1.2.840.10008.1.2");
+# Explicit VR is the safest interoperable choice for RT objects,
+# including the 16-bit RTDOSE pixel data, and is applied
+# uniformly across RTSTRUCT / RTPLAN / RTDOSE / reconstructed CT.
+# Original CT (DICOM if present) will have whatever transfer syntax it was exported with.
+GTransferSyntaxUID = "1.2.840.10008.1.2.1"
 GImplementationClassUID = "1.2.826.0.1.3680043.8.498.75006884747854523615841001"
 
 RTDOSEModality = "RTDOSE"

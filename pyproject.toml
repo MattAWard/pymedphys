@@ -23,7 +23,9 @@ classifiers = [
 # CHANGED: "typing-extensions" retained for backwards compat with Py3.10.
 dependencies = [
   "typing-extensions",
-  "tomlkit",
+  # SECURITY: tomlkit >=0.15.1 (bundled advisory fix; also the version
+  # Dependabot PR #17 bumps to).
+  "tomlkit>=0.15.1",
 ]
 
 [project.urls]
@@ -37,11 +39,21 @@ pymedphys = "pymedphys.__main__:main"
 [project.optional-dependencies]
 user = [
   # --- Image processing ---
-  # SECURITY: Pillow 10.4.0 -> >=12.1.1 (CVE-2026-25990: PSD OOB write, FITS decompression bombs)
-  # BREAKING: Pillow 11.0 dropped Python 3.8 support (fine, we require 3.10+).
+  # SECURITY: Pillow >=12.3.0 (2026-07-01 quarterly security release).
+  #   Fixes the July 2026 advisory batch: CVE-2026-59204 (JPEG2000 tiled
+  #   decode memory exhaustion), CVE-2026-59205 (ImageCmsTransform.apply
+  #   heap corruption), CVE-2026-54058 (McIdas AREA mmap row-stride OOB
+  #   read), CVE-2026-54059 (PcfFontFile bomb-check bypass), plus TGA RLE
+  #   OOB read, RankFilter OOB write, GdImageFile/BdfFontFile/FontFile
+  #   decompression-bomb bypasses, PdfStream.decode() bomb, EpsImagePlugin
+  #   infinite loop, and WindowsViewer.get_command() command injection
+  #   (now uses os.startfile()).
+  # BREAKING: Pillow 11.0 dropped Python 3.8 (fine, we require 3.10+).
   #   Pillow 12.0 removed Image.ANTIALIAS (use Image.LANCZOS instead).
-  #   Check all Image.open() + .resize() calls for ANTIALIAS usage.
-  "Pillow>=12.1.1",
+  #   Pillow 12.3.0 removed non-image ImageCms modes.
+  #   VERIFIED: this codebase only calls Image.open() (narrow_png.py,
+  #   paulking/profile.py) — no ANTIALIAS/ImageCms usage, so no code change.
+  "Pillow>=12.3.0",
 
   "PyYAML",
   "anthropic",
@@ -101,8 +113,16 @@ user = [
   #   5. Experimental cache replay removed from caching decorators (1.41)
   #   6. st._is_running_with_streamlit (private API used in _gui.py) - verify still works
   #   7. st.bokeh_chart removed (1.52) - check if used anywhere
+  #   8. SECURITY (>=1.60.0): required so the resolver can take patched
+  #      starlette (>=1.3.1) and python-multipart (>=0.0.32), which are
+  #      pulled in transitively by Streamlit and carry the Host-header
+  #      poisoning, UNC SSRF/NTLM, form-limit DoS and parameter-smuggling
+  #      advisories.
+  #      VERIFIED: no st.cache / st.experimental_dialog / st.bokeh_chart /
+  #      st._is_running_with_streamlit usage anywhere in lib/ — the 1.44
+  #      migration already removed them, so 1.60 needs no code change.
   # Pin upper bound <2.0 to avoid future major breaks.
-  "streamlit>=1.44.0,<2.0",
+  "streamlit>=1.60.0,<2.0",
 
   "timeago",
 
@@ -158,21 +178,33 @@ tests = [
 
 docs = [
   "ipython>=7.31.1",
-  "jupyter-book>=0.12.0,<2.0.0",
+  # NOTE: Dependabot PR #8 proposes jupyter-book 2.x — deliberately NOT taken.
+  #   Jupyter Book 2 is a ground-up rewrite on the MyST-MD (Node) engine with
+  #   a different config format (_config.yml + _toc.yml -> myst.yml), a
+  #   different CLI and a different extension model; it would break the whole
+  #   docs build and is NOT a security fix.  The advisories reaching us
+  #   through this tree (docutils, markdown-it-py) are pinned directly in
+  #   [tool.uv] constraint-dependencies instead, so we get the fixes while
+  #   staying on the 1.x engine.  Revisit as a planned docs migration.
+  "jupyter-book>=1.0.4.post1,<2.0.0",
   "matplotlib",
   "networkx",
   "numba",
   "numpy",
-  "Pillow>=12.1.1",          # ADD — prevents old Pillow resolving via matplotlib
+  "Pillow>=12.3.0",          # prevents old Pillow resolving via matplotlib
   "pydicom>=3.0.2",
   "scipy",
   "sphinx-argparse",
   "sphinx-book-theme",
   "toml",
-  "tornado>=6.5.5",          # ADD — prevents old tornado via ipykernel/jupyter
+  # SECURITY: tornado >=6.5.7 — gzip-bomb decompression without size limit,
+  # Authorization header forwarded across cross-origin redirects,
+  # CurlAsyncHTTPClient per-request credential leak on handle reuse, and
+  # OOB memory access in the C extension.  Pulled in via ipykernel/jupyter.
+  "tornado>=6.5.7",
   "tqdm",
-  "urllib3>=2.7.0",           # ADD — prevents old urllib3 via requests/sphinx
-  "wheel>=0.45.2",            # ADD — path traversal fix
+  "urllib3>=2.7.0",           # prevents old urllib3 via requests/sphinx
+  "wheel>=0.45.2",            # path traversal fix
 ]
 
 doctests = [
@@ -216,7 +248,7 @@ propagate = [
 # NOTE: [all] should be the union of every extra above.
 # Consider generating this programmatically via propagate_extras() to prevent drift.
 all = [
-    "Pillow>=12.1.1",
+    "Pillow>=12.3.0",
     "PyYAML",
     "anthropic",
     "anyio",
@@ -228,7 +260,7 @@ all = [
     "doc8",
     "imageio[tifffile]",
     "ipython>=7.31.1",
-    "jupyter-book>=0.12.0,<2.0.0",
+    "jupyter-book>=1.0.4.post1,<2.0.0",
     "keyring",
     "matplotlib",
     "natsort",
@@ -261,7 +293,7 @@ all = [
     "sphinx-argparse",
     "sphinx-book-theme",
     "sqlalchemy>=2.0",
-    "streamlit>=1.44.0,<2.0",
+    "streamlit>=1.60.0,<2.0",
     "tabulate",
     "timeago",
     "toml",
@@ -281,6 +313,72 @@ full  = ["user", "tests", "docs", "doctests", "cli", "dicom", "icom", "mosaiq"]
 [dependency-groups]
 dev = [
   "sphinx-external-toc>=1.0.1",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Transitive security floors.
+#
+# These packages are NOT direct dependencies of pymedphys — they arrive via
+# streamlit, pygithub, beautifulsoup4, sphinx and the jupyter stack.  Listing
+# them as constraints raises the floor during resolution WITHOUT adding them
+# to the public dependency surface (so `pip install pymedphys` does not start
+# advertising starlette et al. as pymedphys requirements).
+#
+# Each entry exists to close a specific advisory; remove an entry only once
+# the parent package's own floor has moved past it.
+[tool.uv]
+constraint-dependencies = [
+  # via streamlit — Host header validation bypass poisoning request.url.path,
+  # SSRF + NTLM credential theft via UNC paths in StaticFiles on Windows,
+  # request.form() limits silently ignored (DoS), arbitrary HTTP method
+  # dispatched to HTTPEndpoint via getattr, unvalidated path concatenated
+  # into authority poisoning request.url.hostname.
+  "starlette>=1.3.1",
+
+  # via streamlit — quadratic-time querystring parsing with semicolon
+  # separators (CPU DoS), negative Content-Length buffering the whole body,
+  # Content-Disposition parameter smuggling (RFC 2231/5987), semicolon
+  # treated as querystring field separator.
+  "python-multipart>=0.0.32",
+
+  # via pygithub — public-key JWK accepted as HMAC secret (forged HS256
+  # tokens), algorithm allow-list bypass with PyJWK/PyJWKClient keys,
+  # unauthenticated DoS via unbounded Base64URL decoding in detached JWS,
+  # PyJWKClient missing scheme allowlist (CVE-2024-21643-class SSRF) and
+  # unbounded JWKS endpoint requests via attacker-controlled kid values.
+  "pyjwt>=2.13.0",
+
+  # via beautifulsoup4 — memory exhaustion from large comma-separated
+  # selector lists, and ReDoS in the selector parser.
+  "soupsieve>=2.9.1",
+
+  # via pyjwt / secretstorage — vulnerable OpenSSL bundled in the
+  # cryptography wheels.
+  "cryptography>=49.0.0",
+
+  # via ipykernel / jupyter-client / streamlit — see the tornado note in
+  # the [docs] extra above.
+  "tornado>=6.5.7",
+
+  # via matplotlib / imageio / streamlit — see the Pillow note in [user].
+  "Pillow>=12.3.0",
+
+  # NOTE: docutils >=0.22.4 (Dependabot PR #14) is deliberately NOT
+  #   constrained here, for the same reason as markdown-it-py below:
+  #   jupyter-book 1.0.4.post1 requires docutils >=0.18,<0.22, so the bump is
+  #   unsatisfiable until the Jupyter Book 2 migration.  It is a feature/
+  #   maintenance bump rather than a security fix, so nothing is exposed by
+  #   deferring it.
+
+  # NOTE: markdown-it-py >=4.0.0 (Dependabot PR #13) is deliberately NOT
+  #   constrained here.  It is a feature bump, not a security fix, and it is
+  #   *unsatisfiable* on Jupyter Book 1.x: jupyter-book 1.0.4.post1 requires
+  #   myst-parser >=3.0,<4, which pins markdown-it-py >=3.0,<4.  3.0.0 is the
+  #   only 3.x release, so there is nothing to move to.  This bump can only
+  #   land together with the Jupyter Book 2 migration noted in [docs].
+
+  # via requests / pygithub (Dependabot PR #15).
+  "urllib3>=2.7.0",
 ]
 
 [tool.hatch.build]

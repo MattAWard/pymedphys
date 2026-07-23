@@ -47,7 +47,31 @@ import time
 from pymedphys._dicom.orientation import IMAGE_ORIENTATION_MAP
 from pymedphys._imports import numpy as np
 from pymedphys._imports import pydicom
+# DICOM DS (Decimal String) maximum length — PS3.5 Table 6.2-1.
+_DICOM_DS_MAX = 16
+
+
+def _format_ds_value(value):
+    """Render a float as a DICOM DS string of at most 16 characters.
+
+    DoseGridScaling is VR DS, so ``str(float)`` (which can be 21+ chars,
+    e.g. "0.0004231092002428742") is non-conformant and is rejected or
+    silently truncated by strict readers.  The most precise representation
+    that fits is used; DS permits E-notation, so tiny/huge magnitudes stay
+    representable.  Relative precision retained is ~1e-11, which is far
+    below any dosimetric significance.
+    """
+    value = float(value)
+    for precision in range(15, 0, -1):
+        text = f"{value:.{precision}g}"
+        if len(text) <= _DICOM_DS_MAX:
+            return text
+    # Unreachable for finite floats, but never emit an over-long value.
+    return f"{value:.6e}"[:_DICOM_DS_MAX]
+
+
 from pymedphys._pinnacle.pinnacle_exceptions import (
+    InvalidDoseNormalizationError,
     MissingBeamDoseError,
     MissingCTImageError,
     MissingTrialBeamsError,
@@ -406,6 +430,13 @@ def convert_dose(plan, export_path):
                 "Skipping RTDOSE for trial '%s': %s", trial_info["Name"], exc
             )
             continue
+        except InvalidDoseNormalizationError as exc:
+            # Failed on purpose — surface loudly so the operator
+            # knows this trial's dose export was refused, not merely absent.
+            plan.logger.error(
+                "RTDOSE export failed for trial '%s': %s", trial_info["Name"], exc
+            )
+            continue
 
 
 # ---------------------------------------------------------------------------
@@ -497,10 +528,15 @@ def _convert_dose_for_trial(
         raise MissingBeamDoseError(
             f"No usable beam dose accumulated for trial: {trial_name}"
         )
-    # TODO [IS-720] Check if any reasons for keeping only 14 bits, as Pinnacle exports on all 16 bits
-    scale = max(summed_pixel_values) / 16384
-    ds.DoseGridScaling = scale
-    plan.logger.debug("Dose Grid Scaling: %s", scale)
+    # Map the maximum dose to the full unsigned 16-bit range (65535),
+    # matching Pinnacle's own export, instead of the previous
+    # 16384 divisor which quantised the grid to ~14 effective bits.
+    scale = max(summed_pixel_values) / 65535
+    # DoseGridScaling is VR DS (max 16 chars) — a bare float repr overflows
+    # it and produces a non-conformant value.
+    ds.DoseGridScaling = _format_ds_value(scale)
+    plan.logger.debug(
+        "Dose Grid Scaling: %s (DS-encoded: %s)", scale, ds.DoseGridScaling)
 
     if scale != 0:
         # Clamp to the unsigned 16-bit range so the encoded values agree with
@@ -536,7 +572,7 @@ def _convert_dose_for_trial(
         pixel_values = [v for frame in frames for v in frame]
 
     # Pack as little-endian unsigned 16-bit to agree with the declared
-    # PixelRepresentation = 0 (unsigned) and the Implicit VR LE transfer syntax.
+    # PixelRepresentation = 0 (unsigned) and the Explicit VR LE transfer syntax.
     ds.PixelData = struct.pack("<%dH" % len(pixel_values), *pixel_values)
 
     ds.FrameIncrementPointer = ds.data_element("GridFrameOffsetVector").tag
@@ -544,7 +580,7 @@ def _convert_dose_for_trial(
     # --- Save ---
     output_file = os.path.join(export_path, rd_filename)
     plan.logger.info("Creating Dose file: %s", output_file)
-    ds.save_as(output_file)
+    ds.save_as(output_file, enforce_file_format=True)
 
 
 def _sum_beam_doses(
@@ -627,7 +663,7 @@ def _sum_beam_doses(
                 beam["Name"],
                 len(binary_data),
                 expected_bytes,
-            )  # TODO [IS-721] Consider raising an error instead of warning, as this may indicate a mismatch in dose grid dimensions.
+            )
 
         # --- Prescription and scaling ---
         prescription = [
@@ -722,13 +758,29 @@ def _sum_beam_doses(
         if cGy_per_unit_weight != 0:
             beam_weight = (total_prescription / cGy_per_unit_weight) / num_fractions
         else:
-            # TODO [IS-722] Fail if PrescriptionDose is non-zero, carry on otherwise
+            # A beam that carries a non-zero prescription dose but
+            # interpolates to zero at its prescription point cannot have its
+            # monitor units derived — including it with zero weight would
+            # silently under-report the PLAN summation, so fail this trial's
+            # dose export.  A genuinely zero-prescription beam (e.g. a setup
+            # field) legitimately contributes nothing and conversion carries
+            # on with a warning.
+            prescription_dose = beam["MonitorUnitInfo"]["PrescriptionDose"]
+            if prescription_dose:
+                raise InvalidDoseNormalizationError(
+                    f"Beam '{beam['Name']}' has a non-zero prescription dose "
+                    f"({prescription_dose} cGy/fraction) but the interpolated "
+                    f"dose at its prescription point "
+                    f"'{beam['PrescriptionPointName']}' is zero, so its "
+                    f"monitor units cannot be derived. The PLAN dose "
+                    f"summation would under-report total dose; verify the "
+                    f"prescription point lies within the beam's dose region."
+                )
             beam_weight = 0
             plan.logger.warning(
                 "Interpolated dose at the prescription point for beam '%s' is "
-                "zero, so its monitor units cannot be derived; this beam will "
-                "contribute no dose to the PLAN summation. Verify the "
-                "prescription point lies within the beam's dose region.",
+                "zero and its prescription dose is also zero; this beam will "
+                "contribute no dose to the PLAN summation.",
                 beam["Name"],
             )
         plan.logger.debug("Beam MU: %s", beam_weight)
@@ -765,5 +817,4 @@ def _sum_beam_doses(
             for i in range(len(summed_pixel_values)):
                 summed_pixel_values[i] += main_pix_array[i]
 
-    return summed_pixel_values
     return summed_pixel_values

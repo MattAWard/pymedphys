@@ -44,6 +44,8 @@ import time
 
 from pymedphys._imports import pydicom
 from pymedphys._pinnacle.pinnacle_exceptions import (
+    IsocenterNotFoundError,
+    MachineDataNotFoundError,
     MissingCTImageError,
     MissingTrialBeamsError,
 )
@@ -55,7 +57,11 @@ from .constants import (
     RTPlanSOPClassUID,
     RTStructSOPClassUID,
 )
-from .pinnacle_metadata import append_pinnacle_metadata_for_plan, apply_equipment_stamps
+from .pinnacle_metadata import (
+    append_pinnacle_metadata_for_plan,
+    apply_approval_status,
+    apply_equipment_stamps,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,31 +83,350 @@ def _sanitize_for_filename(name):
     return re.sub(r"[^\w\-.]", "_", str(name)) if name else "trial"
 
 
-def _generate_leaf_position_boundaries():
-    # FIXME [IS-725] This is a hardcoded Varian-Millennium pattern. It should be derived from the Pinnacle machine data instead of being hardcoded.
-    """Generate the standard 51-element Varian-style MLC leaf position boundaries.
+# DICOM LO (Long String) maximum length — used for SeriesDescription.
+_DICOM_LO_MAX = 64
 
-    Boundaries go from -200 to +200 mm in a pattern of:
-      -200 to -100 in 10 mm steps (11 values)
-      -95  to  +95 in  5 mm steps (39 values, but -100 and +100 already counted)
-      +100 to +200 in 10 mm steps
-    Total: 51 boundaries for 50 leaf pairs.
+# DICOM SH (Short String) maximum length — used for RTPlanLabel.
+_DICOM_SH_MAX = 16
+
+
+def _truncate_sh(value, logger=None, tag=""):
+    """Truncate a value to the DICOM SH (Short String) limit of 16 chars.
+
+    Pinnacle plan names regularly exceed 16 characters (e.g.
+    "CopyOf_1_LtBreast" -> RTPlanLabel "CopyOf_1_LtBreast.0" = 19), which
+    pydicom warns about and which some PACS reject outright.  The full,
+    untruncated name is always still available in the LO-VR fields
+    (RTPlanName / StructureSetName / SeriesDescription), so nothing is
+    lost — only the short label is clipped.
     """
-    boundaries = []
-    # Outer leaves: -200 to -100 in steps of 10
-    for v in range(-200, -100, 10):
-        boundaries.append(str(v))
-    # Inner leaves: -100 to +100 in steps of 5
-    for v in range(-100, 105, 5):
-        boundaries.append(str(v))
-    # Outer leaves: +110 to +200 in steps of 10
-    for v in range(110, 210, 10):
-        boundaries.append(str(v))
-    return boundaries
+    text = str(value or "")
+    if len(text) <= _DICOM_SH_MAX:
+        return text
+    truncated = text[:_DICOM_SH_MAX]
+    if logger is not None:
+        logger.warning(
+            "%s value %r is %d chars, exceeding the DICOM SH limit of %d; "
+            "truncated to %r (the full name is retained in the "
+            "corresponding LO-VR attribute).",
+            tag or "SH", text, len(text), _DICOM_SH_MAX, truncated,
+        )
+    return truncated
 
 
-# Pre-compute the leaf boundaries so we don't rebuild the list on every beam.
-_LEAF_POSITION_BOUNDARIES = _generate_leaf_position_boundaries()
+def _format_ds(value):
+    """Format a float for a DICOM DS (Decimal String, max 16 chars)."""
+    text = f"{float(value):.6f}".rstrip("0").rstrip(".")
+    if text in ("", "-"):
+        text = "0"
+    return text[:16]
+
+
+def _append_trial_series_description(ds, trial_name, prefix):
+    """Append 'prefix: trial' to SeriesDescription, respecting the LO VR.
+
+    Exported objects carry their trial name so that a reviewer
+    can distinguish trials within a plan at the PACS/TPS end.
+    """
+    label = f"{prefix}: {trial_name}"
+    base = (getattr(ds, "SeriesDescription", "") or "").strip()
+    combined = f"{base} - {label}" if base else label
+    if len(combined) > _DICOM_LO_MAX:
+        combined = combined[: _DICOM_LO_MAX - 3].rstrip() + "..."
+    ds.SeriesDescription = combined
+
+
+def _iter_machine_dicts(node, _depth=0):
+    """Yield every dict in *node* that looks like a Pinnacle machine entry.
+
+    ``pinn_to_dict`` nests top-level Pinnacle objects under their type name
+    — ``plan.Trial`` parses to ``{"Trial": {...}}``, and
+    ``plan.Pinnacle.Machines`` likewise wraps each machine (single machine,
+    a list of machines, or a keyed container, depending on the file).  The
+    previous implementation only looked at the top level, so
+    ``machine.get("Name")`` returned ``None`` and every lookup failed —
+    which in turn blocked SAD, DosePerMuAtCalibration and (since the MLC
+    fallback was removed) the entire RTPLAN export.
+
+    Rather than hard-coding one nesting shape, this walks the parsed
+    structure and yields any dict carrying a "Name" key alongside at least
+    one machine-ish attribute.  Depth is bounded so a pathological file
+    cannot cause runaway recursion.
+    """
+    if _depth > 6:
+        return
+
+    if isinstance(node, dict):
+        keys = set(node)
+        if "Name" in keys and keys & {
+            "PhotonEnergyList",
+            "ElectronEnergyList",
+            "MultiLeaf",
+            "MultiLeafLayout",
+            "VersionTimestamp",
+            "SourceToAxisDistance",
+            "SourceAxisDistance",
+            "SAD",
+        }:
+            yield node
+        for value in node.values():
+            yield from _iter_machine_dicts(value, _depth + 1)
+
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_machine_dicts(item, _depth + 1)
+
+
+def _select_machine(machine_info, machinename, machineversion, logger=None):
+    """Return the machine dict matching *machinename*/*machineversion*.
+
+    Searches the parsed ``plan.Pinnacle.Machines`` structure at any nesting
+    depth (see :func:`_iter_machine_dicts`).  Returns ``None`` when no match
+    is found — callers must fall back to safe behaviour (and, for the MLC
+    boundary table, refuse the export rather than assume geometry).
+    """
+    if machine_info is None:
+        return None
+
+    candidates = list(_iter_machine_dicts(machine_info))
+    if not candidates:
+        if logger is not None:
+            logger.warning(
+                "No machine entries could be located in the parsed "
+                "plan.Pinnacle.Machines structure (top-level keys: %s). The "
+                "file may use an unexpected layout.",
+                sorted(machine_info)[:10] if isinstance(machine_info, dict)
+                else type(machine_info).__name__,
+            )
+        return None
+
+    # 1. Exact match on both name and version timestamp.
+    for machine in candidates:
+        if machine.get("Name") == machinename and (
+            not machineversion
+            or machine.get("VersionTimestamp") == machineversion
+        ):
+            return machine
+
+    # 2. Name-only match (version timestamps occasionally differ between the
+    #    Trial reference and the Machines file).
+    for machine in candidates:
+        if machine.get("Name") == machinename:
+            if logger is not None:
+                logger.debug(
+                    "Machine '%s' matched by name only (version '%s' not "
+                    "matched exactly; file has '%s').",
+                    machinename, machineversion,
+                    machine.get("VersionTimestamp"),
+                )
+            return machine
+
+    # No match — report what IS in the file so the mismatch is diagnosable
+    # without hand-parsing the archive.
+    if logger is not None:
+        available = [
+            f"{m.get('Name')!r} (version {m.get('VersionTimestamp')!r})"
+            for m in candidates[:8]
+        ]
+        logger.warning(
+            "Machine '%s' (version '%s') not found among the %d machine "
+            "entry/entries in plan.Pinnacle.Machines. Available: %s",
+            machinename, machineversion, len(candidates),
+            "; ".join(available) or "(none)",
+        )
+    return None
+
+
+def _get_machine_sad_mm(machine, logger, beam_name):
+    """Read the source-axis distance (mm) from Pinnacle machine data.
+
+    Pinnacle stores geometry in cm; several key spellings are probed.
+    Returns ``None`` when the value is absent or fails a
+    sanity check, in which case the caller falls back to 1000 mm with a
+    logged assumption.
+    """
+    if not isinstance(machine, dict):
+        return None
+
+    for key in ("SourceToAxisDistance", "SourceAxisDistance", "SAD"):
+        raw = machine.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            sad_mm = float(raw) * 10  # Pinnacle cm → DICOM mm
+        except (TypeError, ValueError):
+            continue
+        # Sanity window: clinical linac SADs sit comfortably within
+        # 500–3000 mm.  Anything outside suggests a unit/parse problem.
+        if 500 <= sad_mm <= 3000:
+            return sad_mm
+        logger.warning(
+            "Beam '%s': machine SAD value %s (key '%s') is outside the "
+            "plausible 500–3000 mm range after cm→mm conversion; ignoring "
+            "and falling back to 1000 mm.",
+            beam_name,
+            sad_mm,
+            key,
+        )
+        return None
+
+    return None
+
+
+def _leaf_boundaries_from_machine(machine, expected_pairs, logger):
+    """Build LeafPositionBoundaries (mm strings) from Pinnacle machine data.
+
+    Derives the boundary table from the machine's MultiLeaf layout
+    (leaf-pair centre positions and widths, stored in cm) instead
+    of assuming the Varian-Millennium pattern.
+
+    Returns a list of ``expected_pairs + 1`` boundary strings, or ``None``
+    when the machine data is absent/inconsistent — in which case the
+    trial's RTPLAN export fails (MachineDataNotFoundError) rather than
+    exporting with an assumed boundary table.
+    """
+    if not isinstance(machine, dict):
+        return None
+
+    multileaf = machine.get("MultiLeaf") or machine.get("MultiLeafLayout")
+    if not isinstance(multileaf, dict):
+        return None
+
+    pair_container = (
+        multileaf.get("LeafPairList")
+        or multileaf.get("LeafPairArray")
+        or multileaf.get("LeafPairs")
+    )
+    if pair_container is None:
+        return None
+
+    # Normalise the parser output into a flat list of leaf-pair dicts.
+    if isinstance(pair_container, dict):
+        pairs = [v for v in pair_container.values() if isinstance(v, dict)]
+        # Some parses nest each pair under a repeated "LeafPair" key that
+        # collapses to a single dict/list — handle a list value too.
+        if not pairs:
+            inner = pair_container.get("LeafPair")
+            if isinstance(inner, list):
+                pairs = [p for p in inner if isinstance(p, dict)]
+            elif isinstance(inner, dict):
+                pairs = [inner]
+    elif isinstance(pair_container, list):
+        pairs = [p for p in pair_container if isinstance(p, dict)]
+    else:
+        return None
+
+    geometry = []
+    for pair in pairs:
+        center = pair.get("YCenterPosition", pair.get("CenterPosition"))
+        width = pair.get("Width", pair.get("LeafWidth"))
+        if center is None or width is None:
+            return None
+        try:
+            geometry.append((float(center) * 10, float(width) * 10))  # cm → mm
+        except (TypeError, ValueError):
+            return None
+
+    if len(geometry) != expected_pairs:
+        logger.warning(
+            "Machine MultiLeaf data describes %d leaf pairs but the plan "
+            "data implies %d; the machine boundary table cannot be used and "
+            "this trial's RTPLAN export will fail.",
+            len(geometry),
+            expected_pairs,
+        )
+        return None
+
+    geometry.sort(key=lambda cw: cw[0])
+
+    boundaries = [geometry[0][0] - geometry[0][1] / 2]
+    for center, width in geometry:
+        boundaries.append(center + width / 2)
+
+    # The table must be strictly increasing to be a valid boundary set.
+    for a, b in zip(boundaries, boundaries[1:]):
+        if b <= a:
+            logger.warning(
+                "Machine MultiLeaf boundaries are not strictly increasing "
+                "(%s then %s); the machine boundary table cannot be used and "
+                "this trial's RTPLAN export will fail.",
+                a,
+                b,
+            )
+            return None
+
+    return [_format_ds(b) for b in boundaries]
+
+
+def _resolve_beam_isocenter(plan, beam):
+    """Resolve the isocenter for a specific beam.
+
+    Priority order:
+
+    1. The beam's ``IsocenterName`` from ``plan.Trial``, looked up in
+       ``plan.Points`` (case-insensitive).  A named-but-missing point is
+       an error: assuming another point would be dangerous.
+    2. The plan-level heuristic (``find_iso_center``: PoiInterpretedType,
+       iso-like names, CT centre) for archives whose trial data carries
+       no isocenter name.
+
+    Raises
+    ------
+    IsocenterNotFoundError
+        When no isocenter can be resolved.
+    """
+    iso_name = str(beam.get("IsocenterName", "") or "").strip()
+    if iso_name:
+        for point in plan.points:
+            if str(point.get("Name", "")).strip().lower() == iso_name.lower():
+                iso = plan.convert_point(point)
+                plan.logger.debug(
+                    "Beam '%s': isocenter '%s' resolved from plan.Points: %s",
+                    beam.get("Name"),
+                    iso_name,
+                    iso,
+                )
+                return iso
+        raise IsocenterNotFoundError(
+            f"Beam '{beam.get('Name')}' references isocenter point "
+            f"'{iso_name}' which was not found in plan.Points."
+        )
+
+    # No IsocenterName in this archive — fall back to the plan-level
+    # heuristic.  plan.iso_center lazily runs find_iso_center, which no
+    # longer defaults to an arbitrary first point (returns [] instead).
+    iso = plan.iso_center
+    if iso is not None and len(iso) >= 3:
+        plan.logger.debug(
+            "Beam '%s': no IsocenterName in trial data; using plan-level "
+            "isocenter heuristic: %s",
+            beam.get("Name"),
+            iso,
+        )
+        return iso
+
+    raise IsocenterNotFoundError(
+        f"No isocenter could be determined for beam '{beam.get('Name')}': "
+        f"the trial data carries no IsocenterName and no isocenter-like "
+        f"point exists in plan.Points."
+    )
+
+
+def _gantry_direction_between(prev_angle, next_angle):
+    """Return the DICOM rotation direction from *prev_angle* to *next_angle*.
+
+    Angles are in degrees; the shorter arc decides the
+    direction, with the delta normalised into (-180, 180].
+    """
+    try:
+        delta = (float(next_angle) - float(prev_angle) + 180.0) % 360.0 - 180.0
+    except (TypeError, ValueError):
+        return "NONE"
+    if delta > 1e-6:
+        return "CW"
+    if delta < -1e-6:
+        return "CC"
+    return "NONE"
 
 
 def _parse_mlc_leaf_positions(control_point):
@@ -185,10 +510,24 @@ def _parse_wedge_info(cp_data, plan_logger):
     return info
 
 
-def _populate_beam_limiting_device_seq(beam_ds, p_count, logger=None):
+def _populate_beam_limiting_device_seq(
+    beam_ds, p_count, logger=None, machine_boundaries=None
+):
     """Populate the BeamLimitingDeviceSequence for a beam.
 
-    Creates entries for ASYMX, ASYMY, and MLCX.
+    Creates entries for ASYMX and ASYMY, plus MLCX when the beam has MLC
+    leaf data.  The MLCX boundary table MUST come from the Pinnacle
+    machine data (*machine_boundaries*): exporting with an
+    assumed table (the old hardcoded Varian-Millennium fallback) is
+    dangerous — a wrong table silently shifts every leaf pair — so a
+    beam that uses an MLC without derivable machine geometry fails the
+    trial's RTPLAN export instead.
+
+    Raises
+    ------
+    MachineDataNotFoundError
+        When p_count > 0 but no consistent boundary table was derived
+        from the machine data.
     """
     beam_ds.BeamLimitingDeviceSequence = _new_sequence()
 
@@ -202,34 +541,43 @@ def _populate_beam_limiting_device_seq(beam_ds, p_count, logger=None):
     asymy.NumberOfLeafJawPairs = "1"
     beam_ds.BeamLimitingDeviceSequence.append(asymy)
 
-    mlcx = _new_dataset()
-    mlcx.RTBeamLimitingDeviceType = "MLCX"
     # NumberOfLeafJawPairs has VR=IS (integer); use integer division so we
     # never emit a fractional value such as "60.0".
     num_pairs = p_count // 2
-    mlcx.NumberOfLeafJawPairs = num_pairs
-    # TODO [IS-725] This is a hardcoded Varian-Millennium pattern. It should be derived from the Pinnacle machine data instead of being hardcoded.
-    mlcx.LeafPositionBoundaries = _LEAF_POSITION_BOUNDARIES
-    # DICOM requires len(LeafPositionBoundaries) == NumberOfLeafJawPairs + 1.
-    # The boundary table is a fixed Varian-Millennium pattern, so warn when the
-    # data implies a different MLC (e.g. Elekta 80-pair, Varian HD120).
-    if logger is not None and num_pairs + 1 != len(_LEAF_POSITION_BOUNDARIES):
-        logger.warning(
-            "MLC leaf-pair count from the plan data (%d) does not match the "
-            "hardcoded LeafPositionBoundaries table (%d boundaries for %d "
-            "pairs); the exported MLC geometry may be incorrect for this "
-            "machine.",
-            num_pairs,
-            len(_LEAF_POSITION_BOUNDARIES),
-            len(_LEAF_POSITION_BOUNDARIES) - 1,
+
+    if num_pairs == 0:
+        # Jaw-only beam: no MLCX device entry (valid DICOM without one).
+        if logger is not None:
+            logger.debug(
+                "Beam has no MLC leaf data; MLCX omitted from "
+                "BeamLimitingDeviceSequence."
+            )
+        return
+
+    if machine_boundaries is None or len(machine_boundaries) != num_pairs + 1:
+        raise MachineDataNotFoundError(
+            f"MLC LeafPositionBoundaries for {num_pairs} leaf pairs could "
+            f"not be derived from the Pinnacle machine data "
+            f"(plan.Pinnacle.Machines). Exporting with an assumed boundary "
+            f"table is unsafe, so this trial's RTPLAN export is refused. "
+            f"Verify the machine file is present in the archive and its "
+            f"MultiLeaf layout matches the plan's leaf count."
         )
+
+    mlcx = _new_dataset()
+    mlcx.RTBeamLimitingDeviceType = "MLCX"
+    mlcx.NumberOfLeafJawPairs = num_pairs
+    # IS-725: boundaries derived from the Pinnacle machine MultiLeaf data.
+    mlcx.LeafPositionBoundaries = machine_boundaries
     beam_ds.BeamLimitingDeviceSequence.append(mlcx)
 
 
 def _create_bld_position_entries(x1, x2, y1, y2, leafpositions):
-    """Create the three BeamLimitingDevicePositionSequence items for CP 0.
+    """Create the BeamLimitingDevicePositionSequence items for a control point.
 
-    Returns a Sequence containing ASYMX, ASYMY, and MLCX entries.
+    Returns a Sequence containing ASYMX and ASYMY entries, plus an MLCX
+    entry when the beam has MLC leaf data (jaw-only beams legitimately
+    have no MLCX device).
     """
     bld_seq = _new_sequence()
 
@@ -243,24 +591,12 @@ def _create_bld_position_entries(x1, x2, y1, y2, leafpositions):
     asymy.LeafJawPositions = [y1, y2]
     bld_seq.append(asymy)
 
-    mlcx = _new_dataset()
-    mlcx.RTBeamLimitingDeviceType = "MLCX"
-    mlcx.LeafJawPositions = leafpositions
-    bld_seq.append(mlcx)
+    if leafpositions:
+        mlcx = _new_dataset()
+        mlcx.RTBeamLimitingDeviceType = "MLCX"
+        mlcx.LeafJawPositions = leafpositions
+        bld_seq.append(mlcx)
 
-    return bld_seq
-
-
-def _create_mlc_only_position_entry(leafpositions):
-    """Create a single-item BeamLimitingDevicePositionSequence for MLC only.
-
-    Used for control points after the first, where only MLC positions change.
-    """
-    bld_seq = _new_sequence()
-    mlcx = _new_dataset()
-    mlcx.RTBeamLimitingDeviceType = "MLCX"
-    mlcx.LeafJawPositions = leafpositions
-    bld_seq.append(mlcx)
     return bld_seq
 
 
@@ -297,36 +633,34 @@ def _populate_first_control_point(
     plan,
     beam_energy,
     doserate,
-    gantryangle,
-    colangle,
-    psupportangle,
     gantryrotdir,
     numwedges,
-    x1,
-    x2,
-    y1,
-    y2,
-    leafpositions,
+    cp_entry,
+    iso_center,
 ):
     """Populate all attributes required by DICOM for the first control point.
 
     Per DICOM C.8.8.14.5: at the first control point, ALL applicable
     attributes must be present. This includes 1C and 2C attributes.
+
+    All geometric values now come from *cp_entry* — the parsed data of
+    the beam's first Pinnacle control point — rather than values
+    frozen from whichever control point was parsed last.
     """
     # --- Required energy and dose rate (Type 3 but universally expected) ---
     cp.NominalBeamEnergy = beam_energy
     cp.DoseRateSet = doserate
 
     # --- Gantry (1C — required at first CP) ---
-    cp.GantryAngle = gantryangle
+    cp.GantryAngle = cp_entry["gantry"]
     cp.GantryRotationDirection = gantryrotdir
 
     # --- Collimator (1C — required at first CP) ---
-    cp.BeamLimitingDeviceAngle = colangle
+    cp.BeamLimitingDeviceAngle = cp_entry["collimator"]
     cp.BeamLimitingDeviceRotationDirection = "NONE"
 
     # --- Patient Support / Couch (1C — required at first CP) ---
-    cp.PatientSupportAngle = psupportangle
+    cp.PatientSupportAngle = cp_entry["couch"]
     cp.PatientSupportRotationDirection = "NONE"
 
     # --- Table Top Eccentric (1C — required at first CP) ---
@@ -339,7 +673,8 @@ def _populate_first_control_point(
     cp.TableTopLateralPosition = ""
 
     # --- Isocenter (2C — required at first CP when isocentric) ---
-    cp.IsocenterPosition = plan.iso_center
+    # Resolved per beam from the trial's IsocenterName.
+    cp.IsocenterPosition = iso_center
 
     # --- Source to Surface Distance (Type 3) ---
     cp.SourceToSurfaceDistance = beam["SSD"] * 10
@@ -350,7 +685,11 @@ def _populate_first_control_point(
 
     # --- Beam Limiting Device positions (1C) ---
     cp.BeamLimitingDevicePositionSequence = _create_bld_position_entries(
-        x1, x2, y1, y2, leafpositions
+        cp_entry["x1"],
+        cp_entry["x2"],
+        cp_entry["y1"],
+        cp_entry["y2"],
+        cp_entry["leafpositions"],
     )
 
     # --- Beam-level counts (Type 1 — placed here for locality but belong to beam) ---
@@ -378,7 +717,7 @@ def convert_plan(plan, export_path):
         plan.logger.error("No primary image found for plan. Unable to generate RTPLAN.")
         raise MissingCTImageError("Plan has no primary image associated with it.")
 
-    # TODO [IS-724] Test the RTPLAN export functionality and remove this warning
+    # TODO Test the RTPLAN export functionality and remove this warning
     plan.logger.warning(
         "RTPLAN export functionality is currently not validated and not stable. "
         "Use with caution."
@@ -401,6 +740,13 @@ def convert_plan(plan, export_path):
         except MissingTrialBeamsError as exc:
             plan.logger.warning(
                 "Skipping RTPLAN for trial '%s': %s", trial_info["Name"], exc
+            )
+            continue
+        except (IsocenterNotFoundError, MachineDataNotFoundError) as exc:
+            # Refusing to guess geometry; surface
+            # loudly so the operator knows this trial's RTPLAN was refused.
+            plan.logger.error(
+                "RTPLAN export failed for trial '%s': %s", trial_info["Name"], exc
             )
             continue
 
@@ -477,8 +823,15 @@ def convert_plan_for_trial(
     ds.FrameOfReferenceUID = image_info["FrameUID"]
     ds.PositionReferenceIndicator = ""
 
+    # Carry the trial name so reviewers can distinguish
+    # trials within a plan at the PACS/TPS end.
+    _append_trial_series_description(ds, trial_info.get("Name", ""), "Plan")
+
     # --- Plan identification ---
-    ds.RTPlanLabel = f"{plan_info['PlanName']}.0"
+    # RTPlanLabel is VR SH (max 16 chars); RTPlanName is LO (max 64) and
+    # keeps the full untruncated Pinnacle plan name.
+    ds.RTPlanLabel = _truncate_sh(
+        f"{plan_info['PlanName']}.0", plan.logger, "RTPlanLabel")
     ds.RTPlanName = plan_info["PlanName"]
     ds.RTPlanDescription = append_pinnacle_metadata_for_plan(
         None,
@@ -488,7 +841,10 @@ def convert_plan_for_trial(
     )
     ds.RTPlanDate = ds.StudyDate
     ds.RTPlanTime = ds.StudyTime
-    ds.PlanIntent = ""  # TODO palliative/curative — find source
+    ds.PlanIntent = ""  # Type 3 — no curative/palliative source in Pinnacle data
+    # PATIENT is correct because this RTPLAN always carries a
+    # ReferencedStructureSetSequence pointing at an image-based RTSTRUCT
+    # (the exporter refuses to run without a primary CT image).
     ds.RTPlanGeometry = "PATIENT"
 
     # --- Referenced Structure Set ---
@@ -498,7 +854,9 @@ def convert_plan_for_trial(
     ref_struct.ReferencedSOPInstanceUID = struct_instance_uid
     ds.ReferencedStructureSetSequence.append(ref_struct)
 
-    ds.ApprovalStatus = "UNAPPROVED"  # TODO [IS-723] Check if defined in trial file
+    # Derived from Pinnacle PlanLockStatus (locked → APPROVED
+    # with reviewer/timestamp audit fields, unlocked → UNAPPROVED).
+    apply_approval_status(ds, plan)
 
     # --- Fraction Group ---
     ds.FractionGroupSequence = _new_sequence()
@@ -548,9 +906,10 @@ def convert_plan_for_trial(
         beam_ds.BeamNumber = beam_count
         beam_ds.TreatmentDeliveryType = "TREATMENT"
         beam_ds.ReferencedPatientSetupNumber = beam_count
+        # SourceAxisDistance is overridden below from the
+        # Pinnacle machine data once the beam's machine has been resolved;
+        # 1000 mm remains only as a logged fallback.
         beam_ds.SourceAxisDistance = "1000"
-        # FIXME [IS-727] Make FinalCumulativeMetersetWeight equal to CumulativeMetersetWeight of last CP
-        beam_ds.FinalCumulativeMetersetWeight = "1"
         beam_ds.PrimaryDosimeterUnit = "MU"
 
         # Primary Fluence Mode
@@ -585,6 +944,12 @@ def convert_plan_for_trial(
 
         beam_ds.TreatmentMachineName = beam["MachineNameAndVersion"].partition(":")[0]
 
+        # --- Isocenter (per beam) ---
+        # Resolved from the trial's IsocenterName where available; raises
+        # IsocenterNotFoundError (failing this trial's RTPLAN) rather than
+        # assuming an arbitrary point.
+        beam_iso_center = _resolve_beam_isocenter(plan, beam)
+
         # --- Dose Reference Point ---
         doserefpt = None
         for point in plan.points:
@@ -594,7 +959,7 @@ def convert_plan_for_trial(
 
         if not doserefpt:
             plan.logger.debug("No dose reference point, setting to isocenter")
-            doserefpt = plan.iso_center
+            doserefpt = beam_iso_center
 
         plan.logger.debug("Dose reference point: %s", doserefpt)
         ref_beam.BeamDoseSpecificationPoint = doserefpt
@@ -607,41 +972,47 @@ def convert_plan_for_trial(
             cp_manager = cp_manager["CPManagerObject"]
 
         numctrlpts = cp_manager["NumberOfControlPoints"]
-        currentmeterset = 0.0
         plan.logger.debug("Number of control points: %s", numctrlpts)
 
         # --- Parse control point data from Pinnacle ---
-        # Extract jaw positions (from first CP that has them) and all leaf positions
-        x1 = x2 = y1 = y2 = None
-        leafpositions = []
-        p_count = 0
-        gantryangle = colangle = psupportangle = 0
-        wedge_info = None
-
-        # TODO [IS-726] This loop is in the wrong place. It should be inside the control point builders, not here. The jaw positions and leaf positions should be extracted per control point, not just once for the beam.
+        # Every Pinnacle control point is parsed into its own entry so the
+        # builders can give each DICOM control point its own jaw and MLC
+        # positions and mechanical angles — previously only the last CP's
+        # values survived the loop and were reused for every DICOM CP.
+        cp_data_list = []
         for cp_data in cp_manager["ControlPointList"]:
             metersetweight.append(cp_data["Weight"])
 
-            # Jaw positions — keep only the first values encountered
-            if x1 is None:
-                x1 = -cp_data["LeftJawPosition"] * 10
-            if x2 is None:
-                x2 = cp_data["RightJawPosition"] * 10
-            if y2 is None:
-                y2 = cp_data["TopJawPosition"] * 10
-            if y1 is None:
-                y1 = -cp_data["BottomJawPosition"] * 10
-
-            # MLC leaf positions
             leafpositions, p_count = _parse_mlc_leaf_positions(cp_data)
 
-            # Mechanical angles
-            gantryangle = cp_data["Gantry"]
-            colangle = cp_data["Collimator"]
-            psupportangle = cp_data["Couch"]
+            cp_data_list.append(
+                {
+                    "x1": -cp_data["LeftJawPosition"] * 10,
+                    "x2": cp_data["RightJawPosition"] * 10,
+                    "y1": -cp_data["BottomJawPosition"] * 10,
+                    "y2": cp_data["TopJawPosition"] * 10,
+                    "leafpositions": leafpositions,
+                    "p_count": p_count,
+                    "gantry": cp_data["Gantry"],
+                    "collimator": cp_data["Collimator"],
+                    "couch": cp_data["Couch"],
+                }
+            )
 
-            # Wedge
-            wedge_info = _parse_wedge_info(cp_data, plan.logger)
+        if not cp_data_list:
+            plan.logger.warning(
+                "Beam '%s' has no control points; skipping beam.", beam["Name"]
+            )
+            raise MissingTrialBeamsError(
+                f"Beam '{beam['Name']}' has no control points."
+            )
+
+        # Wedge context is constant across a beam's control points in
+        # Pinnacle; read it from the first CP.
+        wedge_info = _parse_wedge_info(
+            cp_manager["ControlPointList"][0], plan.logger
+        )
+        p_count = cp_data_list[0]["p_count"]
 
         numwedges = wedge_info["count"] if wedge_info else 0
 
@@ -665,6 +1036,53 @@ def convert_plan_for_trial(
             machinename, machineversion = mnv, ""
         machineenergyname = beam["MachineEnergyName"]
 
+        # --- Machine data ---
+        # plan.machine_info may be None when plan.Pinnacle.Machines is
+        # missing or unparseable; _select_machine handles that (previously
+        # machine_info["Name"] would raise TypeError here).
+        machine = _select_machine(
+            machine_info, machinename, machineversion, plan.logger
+        )
+        if machine is None:
+            plan.logger.warning(
+                "Beam '%s': no machine entry matching '%s' (version '%s'); "
+                "SAD falls back to 1000 mm and, if this beam uses an MLC, "
+                "the trial's RTPLAN export will fail (no assumed "
+                "leaf-boundary table is used). See the preceding message "
+                "for the machine names present in the file.",
+                beam["Name"],
+                machinename,
+                machineversion,
+            )
+
+        # SourceAxisDistance from the machine geometry (fallback 1000 mm).
+        sad_mm = _get_machine_sad_mm(machine, plan.logger, beam["Name"])
+        if sad_mm is not None:
+            beam_ds.SourceAxisDistance = _format_ds(sad_mm)
+            plan.logger.debug(
+                "Beam '%s': SourceAxisDistance %s mm read from machine data.",
+                beam["Name"],
+                beam_ds.SourceAxisDistance,
+            )
+        else:
+            plan.logger.warning(
+                "Beam '%s': SourceAxisDistance not found in machine data; "
+                "assuming standard 1000 mm.",
+                beam["Name"],
+            )
+
+        # MLC LeafPositionBoundaries from the machine MultiLeaf layout.
+        machine_boundaries = _leaf_boundaries_from_machine(
+            machine, p_count // 2, plan.logger
+        )
+        if machine_boundaries is not None:
+            plan.logger.debug(
+                "Beam '%s': LeafPositionBoundaries derived from machine data "
+                "(%d boundaries).",
+                beam["Name"],
+                len(machine_boundaries),
+            )
+
         energy_matches = re.findall(r"[-+]?\d*\.\d+|\d+", machineenergyname)
         if energy_matches:
             beam_energy = energy_matches[0]
@@ -679,12 +1097,9 @@ def convert_plan_for_trial(
 
         # Find DosePerMuAtCalibration from machine data
         dose_per_mu_at_cal = -1
-        if (
-            machine_info["Name"] == machinename
-            and machine_info["VersionTimestamp"] == machineversion
-        ):
-            for energy in machine_info["PhotonEnergyList"]:
-                if energy["Name"] == machineenergyname:
+        if machine is not None:
+            for energy in machine.get("PhotonEnergyList", []) or []:
+                if energy.get("Name") == machineenergyname:
                     dose_per_mu_at_cal = energy["PhysicsData"]["OutputFactor"][
                         "DosePerMuAtCalibration"
                     ]
@@ -752,18 +1167,13 @@ def convert_plan_for_trial(
                 metersetweight,
                 beam_energy,
                 doserate,
-                gantryangle,
-                colangle,
-                psupportangle,
                 gantryrotdir,
                 numwedges,
                 wedge_info,
-                x1,
-                x2,
-                y1,
-                y2,
-                leafpositions,
+                cp_data_list,
                 p_count,
+                machine_boundaries,
+                beam_iso_center,
             )
         else:
             _build_non_ss_control_points(
@@ -774,18 +1184,13 @@ def convert_plan_for_trial(
                 metersetweight,
                 beam_energy,
                 doserate,
-                gantryangle,
-                colangle,
-                psupportangle,
                 gantryrotdir,
                 numwedges,
                 wedge_info,
-                x1,
-                x2,
-                y1,
-                y2,
-                leafpositions,
+                cp_data_list,
                 p_count,
+                machine_boundaries,
+                beam_iso_center,
             )
 
         num_fractions = prescription["NumberOfFractions"]
@@ -816,20 +1221,25 @@ def _build_step_and_shoot_control_points(
     metersetweight,
     beam_energy,
     doserate,
-    gantryangle,
-    colangle,
-    psupportangle,
     gantryrotdir,
     numwedges,
     wedge_info,
-    x1,
-    x2,
-    y1,
-    y2,
-    leafpositions,
+    cp_data_list,
     p_count,
+    machine_boundaries,
+    iso_center,
 ):
-    """Build control points for a Step & Shoot beam."""
+    """Build control points for a Step & Shoot beam.
+
+    Pinnacle control point *i* maps to DICOM control points
+    ``2i`` and ``2i+1`` (the segment's dose is delivered between the
+    pair), and each pair carries that segment's own jaw and MLC
+    positions — previously every control point reused the last
+    segment's aperture.
+
+    FinalCumulativeMetersetWeight is set to the last control
+    point's cumulative weight instead of a hardcoded "1".
+    """
     plan.logger.debug("Using Step & Shoot")
 
     total_cps = numctrlpts * 2
@@ -839,27 +1249,59 @@ def _build_step_and_shoot_control_points(
     if numwedges > 0:
         beam_ds.WedgeSequence = _create_wedge_sequence(wedge_info)
 
-    metercount = 1
+    # --- Pass 1: cumulative meterset weights per DICOM CP ---
+    # Odd control points carry the segment's meterset weight increment.
+    cumulative_weights = []
     currentmeterset = 0.0
+    metercount = 1
+    for j in range(total_cps):
+        if j % 2 == 1:
+            increment = float(metersetweight[metercount])
+            if increment < 0:
+                plan.logger.warning(
+                    "Beam '%s': negative meterset weight (%s) at Pinnacle "
+                    "control point %d; cumulative weights will not be "
+                    "monotonic. Verify the plan data.",
+                    beam["Name"],
+                    increment,
+                    metercount,
+                )
+            currentmeterset += increment
+            metercount += 1
+        cumulative_weights.append(currentmeterset)
 
+    final_weight = cumulative_weights[-1] if cumulative_weights else 0.0
+    beam_ds.FinalCumulativeMetersetWeight = _format_ds(final_weight)
+    if abs(final_weight - 1.0) > 1e-3:
+        plan.logger.warning(
+            "Beam '%s': cumulative meterset weights sum to %s (expected "
+            "~1.0). FinalCumulativeMetersetWeight is set to the actual "
+            "total, which keeps the plan DICOM-conformant, but verify the "
+            "Pinnacle weights.",
+            beam["Name"],
+            final_weight,
+        )
+
+    # --- Pass 2: build the control points ---
     for j in range(total_cps):
         cp = _new_dataset()
         beam_ds.ControlPointSequence.append(cp)
 
         cp.ControlPointIndex = j
-        cp.BeamLimitingDevicePositionSequence = _new_sequence()
         cp.ReferencedDoseReferenceSequence = _new_sequence()
 
         dose_ref = _new_dataset()
         cp.ReferencedDoseReferenceSequence.append(dose_ref)
 
-        if j % 2 == 1:  # odd control points carry the meterset weight
-            currentmeterset += float(metersetweight[metercount])
-            metercount += 1
-
-        cp.CumulativeMetersetWeight = currentmeterset
-        dose_ref.CumulativeDoseReferenceCoefficient = currentmeterset
+        cmw = cumulative_weights[j]
+        cp.CumulativeMetersetWeight = _format_ds(cmw)
+        # Coefficient is the delivered fraction: CMW / FCMW.
+        coefficient = cmw / final_weight if final_weight else 0.0
+        dose_ref.CumulativeDoseReferenceCoefficient = _format_ds(coefficient)
         dose_ref.ReferencedDoseReferenceNumber = "1"
+
+        # DICOM CP j belongs to Pinnacle segment j // 2.
+        cp_entry = cp_data_list[min(j // 2, len(cp_data_list) - 1)]
 
         if j == 0:
             # First control point: all attributes must be present (DICOM C.8.8.14.5)
@@ -870,25 +1312,26 @@ def _build_step_and_shoot_control_points(
                 plan,
                 beam_energy,
                 doserate,
-                gantryangle,
-                colangle,
-                psupportangle,
                 gantryrotdir,
                 numwedges,
-                x1,
-                x2,
-                y1,
-                y2,
-                leafpositions,
+                cp_entry,
+                iso_center,
             )
         else:
-            # Subsequent control points: only MLC changes
-            cp.BeamLimitingDevicePositionSequence = _create_mlc_only_position_entry(
-                leafpositions
+            # Subsequent control points: this segment's own jaw and MLC
+            # positions (jaws can change between segments too).
+            cp.BeamLimitingDevicePositionSequence = _create_bld_position_entries(
+                cp_entry["x1"],
+                cp_entry["x2"],
+                cp_entry["y1"],
+                cp_entry["y2"],
+                cp_entry["leafpositions"],
             )
 
     # Beam Limiting Device Sequence (beam level)
-    _populate_beam_limiting_device_seq(beam_ds, p_count, plan.logger)
+    _populate_beam_limiting_device_seq(
+        beam_ds, p_count, plan.logger, machine_boundaries
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -904,20 +1347,27 @@ def _build_non_ss_control_points(
     metersetweight,
     beam_energy,
     doserate,
-    gantryangle,
-    colangle,
-    psupportangle,
     gantryrotdir,
     numwedges,
     wedge_info,
-    x1,
-    x2,
-    y1,
-    y2,
-    leafpositions,
+    cp_data_list,
     p_count,
+    machine_boundaries,
+    iso_center,
 ):
-    """Build control points for a non-Step-and-Shoot beam (e.g. conformal arc)."""
+    """Build control points for a non-Step-and-Shoot beam (e.g. conformal arc).
+
+    Each DICOM control point carries its own jaw, MLC and gantry
+    values from the matching Pinnacle control point (the final, appended
+    control point repeats the last Pinnacle aperture).
+
+    FinalCumulativeMetersetWeight equals the last control point's
+    cumulative weight instead of a hardcoded "1".
+
+    GantryAngle is written on every control point and
+    GantryRotationDirection is derived per control point from the angle
+    deltas, so beams that reverse direction mid-delivery are represented.
+    """
     plan.logger.debug("Not using Step & Shoot")
 
     total_cps = numctrlpts + 1
@@ -927,24 +1377,58 @@ def _build_non_ss_control_points(
     if numwedges > 0:
         beam_ds.WedgeSequence = _create_wedge_sequence(wedge_info)
 
+    # --- Cumulative meterset weights --------
+    # metersetweight is ["0", w1, ..., wN]; the raw Pinnacle values are
+    # used as cumulative weights (unchanged behaviour), but they are now
+    # verified to be monotonic non-decreasing and FCMW follows the data.
+    cumulative_weights = [float(metersetweight[j]) for j in range(total_cps)]
+    for a, b in zip(cumulative_weights, cumulative_weights[1:]):
+        if b < a:
+            plan.logger.warning(
+                "Beam '%s': CumulativeMetersetWeight decreases (%s → %s); "
+                "the Pinnacle control point weights do not appear to be "
+                "cumulative. The values are exported as-is — verify this "
+                "beam against a native Pinnacle export.",
+                beam["Name"],
+                a,
+                b,
+            )
+            break
+
+    final_weight = cumulative_weights[-1] if cumulative_weights else 0.0
+    beam_ds.FinalCumulativeMetersetWeight = _format_ds(final_weight)
+    if abs(final_weight - 1.0) > 1e-3:
+        plan.logger.warning(
+            "Beam '%s': final cumulative meterset weight is %s (expected "
+            "~1.0). FinalCumulativeMetersetWeight is set to the actual "
+            "value, which keeps the plan DICOM-conformant, but verify the "
+            "Pinnacle weights.",
+            beam["Name"],
+            final_weight,
+        )
+
     for j in range(total_cps):
         cp = _new_dataset()
         beam_ds.ControlPointSequence.append(cp)
 
         cp.ControlPointIndex = j
-        cp.BeamLimitingDevicePositionSequence = _new_sequence()
         cp.ReferencedDoseReferenceSequence = _new_sequence()
 
         dose_ref = _new_dataset()
         cp.ReferencedDoseReferenceSequence.append(dose_ref)
 
-        cp.CumulativeMetersetWeight = metersetweight[j]
+        cmw = cumulative_weights[j]
+        cp.CumulativeMetersetWeight = _format_ds(cmw)
+        coefficient = cmw / final_weight if final_weight else 0.0
+        dose_ref.CumulativeDoseReferenceCoefficient = _format_ds(coefficient)
+        dose_ref.ReferencedDoseReferenceNumber = "1"
+
+        # appended final CP repeats the last Pinnacle aperture.
+        pinn_idx = min(j, len(cp_data_list) - 1)
+        cp_entry = cp_data_list[pinn_idx]
 
         if j == 0:
             # First control point: all attributes must be present
-            dose_ref.CumulativeDoseReferenceCoefficient = "0"
-            dose_ref.ReferencedDoseReferenceNumber = "1"
-
             _populate_first_control_point(
                 cp,
                 beam_ds,
@@ -952,25 +1436,31 @@ def _build_non_ss_control_points(
                 plan,
                 beam_energy,
                 doserate,
-                gantryangle,
-                colangle,
-                psupportangle,
                 gantryrotdir,
                 numwedges,
-                x1,
-                x2,
-                y1,
-                y2,
-                leafpositions,
+                cp_entry,
+                iso_center,
             )
         else:
-            # Subsequent control points: only MLC
-            cp.BeamLimitingDevicePositionSequence = _create_mlc_only_position_entry(
-                leafpositions
+            # Subsequent control points: this control point's own jaw and
+            # MLC positions.
+            cp.BeamLimitingDevicePositionSequence = _create_bld_position_entries(
+                cp_entry["x1"],
+                cp_entry["x2"],
+                cp_entry["y1"],
+                cp_entry["y2"],
+                cp_entry["leafpositions"],
             )
-            dose_ref.CumulativeDoseReferenceCoefficient = "1"
-            dose_ref.ReferencedDoseReferenceNumber = "1"
+
+            # per-control-point gantry angle and rotation
+            # direction so direction reversals mid-delivery are captured.
+            prev_entry = cp_data_list[min(j - 1, len(cp_data_list) - 1)]
+            cp.GantryAngle = cp_entry["gantry"]
+            cp.GantryRotationDirection = _gantry_direction_between(
+                prev_entry["gantry"], cp_entry["gantry"]
+            )
 
     # Beam Limiting Device Sequence (beam level)
-    _populate_beam_limiting_device_seq(beam_ds, p_count, plan.logger)
-    _populate_beam_limiting_device_seq(beam_ds, p_count, plan.logger)
+    _populate_beam_limiting_device_seq(
+        beam_ds, p_count, plan.logger, machine_boundaries
+    )

@@ -3,7 +3,11 @@
     "cypress": "15.16.0"
   },
   "resolutions": {
-    "uuid": ">=14.0.0"
+    "uuid": ">=14.0.0",
+    "form-data": ">=4.0.6",
+    "systeminformation": ">=5.33.0",
+    "tmp": ">=0.2.7",
+    "qs": ">=6.15.3"
   },
   "scripts": {
     "cypress:open": "cypress open",

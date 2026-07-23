@@ -49,7 +49,27 @@ from pymedphys._pinnacle.pinnacle_exceptions import MissingCTImageError
 
 from .constants import (GImplementationClassUID, GTransferSyntaxUID,
                         RTSTRUCTModality, RTStructSOPClassUID, colors)
-from .pinnacle_metadata import apply_equipment_stamps
+from .pinnacle_metadata import apply_approval_status, apply_equipment_stamps
+
+# DICOM LO (Long String) maximum length — used for SeriesDescription.
+_DICOM_LO_MAX = 64
+
+# DICOM SH (Short String) maximum length — used for StructureSetLabel.
+_DICOM_SH_MAX = 16
+
+
+def _set_trial_series_description(ds, trial_name):
+    """Append 'Struct: trial' to SeriesDescription, respecting the LO VR.
+
+    IS: PLAN-08 — exported objects carry their trial name so that a
+    reviewer can distinguish trials within a plan at the PACS/TPS end.
+    """
+    label = f"Struct: {trial_name}"
+    base = (getattr(ds, "SeriesDescription", "") or "").strip()
+    combined = f"{base} - {label}" if base else label
+    if len(combined) > _DICOM_LO_MAX:
+        combined = combined[: _DICOM_LO_MAX - 3].rstrip() + "..."
+    ds.SeriesDescription = combined
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -176,7 +196,9 @@ def find_iso_center(plan):
       2. Points named Iso / isocenter / isocentre / ISO
       3. CT Center / ct center / ct centre
       4. Points containing 'center' or 'iso' in the name (case-sensitive)
-      5. Falls back to the first point if nothing else matches
+    When nothing matches, the isocenter is left unresolved (the previous
+    arbitrary first-point fallback has been removed; the RTPLAN path raises
+    IsocenterNotFoundError instead of guessing).
     """
     iso_center = []
     ct_center = []
@@ -227,9 +249,15 @@ def find_iso_center(plan):
             iso_center = point_with_center
         elif len(point_with_iso) > 1:
             iso_center = point_with_iso
-        elif len(plan.points) > 0:
-            # TODO: check validity of defaulting to first point
-            iso_center = plan.points[0]["refpoint"]
+        else:
+            # no isocenter-like point exists.  The isocenter now left unset
+            # and the RTPLAN path fails explicitly (IsocenterNotFoundError)
+            # rather than exporting a guessed geometry.
+            plan.logger.warning(
+                "No isocenter-like point could be identified among the plan "
+                "points; the isocenter is left unresolved instead of "
+                "defaulting to an arbitrary point."
+            )
 
     plan.iso_center = iso_center
     plan.ct_center = ct_center
@@ -565,9 +593,13 @@ def convert_struct_for_trial(
     ds.AccessionNumber = ""
     ds.Manufacturer = ""  # Type 2; overwritten by apply_equipment_stamps
 
-    ds.StationName = "adacp3u7"  # TODO: determine proper station name
+    # StationName (Type 3): left empty by default; populated from
+    # DICOM_EQUIPMENT.STATION_NAME by apply_equipment_stamps when
+    # configured
+    ds.StationName = ""
     ds.ManufacturerModelName = plan_info.get("ToolType", "")
-    ds.SoftwareVersions = plan_info["PinnacleVersionDescription"]
+    # Wrapped in a list for consistent VM with rtdose.py / rtplan.py.
+    ds.SoftwareVersions = [plan_info["PinnacleVersionDescription"]]
 
     # Apply site-specific equipment identification stamps from config
     apply_equipment_stamps(
@@ -590,6 +622,10 @@ def convert_struct_for_trial(
     ds.SeriesNumber = "1"
     ds.StudyID = plan.primary_image.image["StudyID"]
 
+    # carry the trial name so reviewers can distinguish trials
+    # within a plan at the PACS/TPS end (LO VR, truncated to 64).
+    _set_trial_series_description(ds, trial_info.get("Name", ""))
+
     # --- Patient ---
     ds.PatientID = patient_info["MedicalRecordNumber"]
     ds.PatientName = patient_info["FullName"]
@@ -600,7 +636,19 @@ def convert_struct_for_trial(
     ds.StudyDescription = patient_info["Comment"]
 
     # --- Structure Set identification ---
-    ds.StructureSetLabel = plan_info["PlanName"]
+    # StructureSetLabel is VR SH (max 16 chars).  Pinnacle plan names are
+    # frequently longer (e.g. "CopyOf_1_LtBreast" = 17), so it is clipped
+    # here; the full name remains in SeriesDescription (LO).
+    _label = str(plan_info["PlanName"] or "")
+    if len(_label) > _DICOM_SH_MAX:
+        plan.logger.warning(
+            "StructureSetLabel value %r is %d chars, exceeding the DICOM SH "
+            "limit of %d; truncated to %r (full name retained in "
+            "SeriesDescription).",
+            _label, len(_label), _DICOM_SH_MAX, _label[:_DICOM_SH_MAX],
+        )
+        _label = _label[:_DICOM_SH_MAX]
+    ds.StructureSetLabel = _label
     ds.StructureSetName = "POIandROI"
     ds.StructureSetDescription = ""  # Type 3 — include empty for completeness
 
@@ -655,7 +703,9 @@ def convert_struct_for_trial(
     ds = read_points(ds, plan)
     ds = read_roi(ds, plan, skip_pattern)
 
-    ds.ApprovalStatus = "UNAPPROVED"  # TODO: derive from trial file
+    # Derived from Pinnacle PlanLockStatus (locked → APPROVED
+    # with reviewer/timestamp audit fields, unlocked → UNAPPROVED).
+    apply_approval_status(ds, plan)
 
     # Set the transfer syntax
     set_default_transfer_syntax(ds)

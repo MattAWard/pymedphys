@@ -154,6 +154,57 @@ def _fallback_parse(data_lines):
     return result
 
 
+# Pinnacle anonymous numbered object header, e.g. "#0 ={" at column 0.
+# Anchored to the line start so that indented (nested) numbered entries are
+# left to the existing list/sequence handling in convert_to_yaml.
+_NUMBERED_OBJECT_HEADER = re.compile(r"^#\d+\s*={")
+
+
+class _DuplicateKeyLoader(yaml.SafeLoader):
+    """SafeLoader that records duplicate mapping keys instead of hiding them.
+
+    PyYAML silently keeps the last value when a mapping has duplicate keys.
+    For Pinnacle files that behaviour turns a structural parse problem into
+    silent data corruption — two objects merge and one wins — which is
+    exactly how a two-machine Machines file came to look like a single
+    machine.  Collecting the duplicates lets the caller warn about it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.duplicate_keys = []
+
+    def construct_mapping(self, node, deep=False):
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in mapping:
+                self.duplicate_keys.append(key)
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
+
+
+def _safe_load_reporting_duplicates(yaml_text, filename, segment):
+    """yaml.safe_load equivalent that warns about duplicate mapping keys."""
+    loader = _DuplicateKeyLoader(yaml_text)
+    try:
+        data = loader.get_single_data()
+        duplicates = loader.duplicate_keys
+    finally:
+        loader.dispose()
+
+    if duplicates:
+        unique = sorted(set(duplicates))
+        logger.warning(
+            "'%s' (segment %d): %d duplicate key(s) were overwritten while "
+            "parsing — data from earlier objects has been LOST. Keys: %s%s",
+            filename, segment, len(duplicates),
+            ", ".join(repr(k) for k in unique[:10]),
+            " …" if len(unique) > 10 else "",
+        )
+    return data
+
+
 # if multiple trials, result = list of dicts,  otherwise single dict
 def pinn_to_dict(filename):
     result = None
@@ -165,8 +216,34 @@ def pinn_to_dict(filename):
 
         # Split data into smaller chunks, if first line appears more than one
         # Useful for plan.Trial files with more than one Trial
+        #
+        # Pinnacle also stores anonymous numbered objects with "#N ={"
+        # headers ("#0 ={", "#1 ={", ...) — plan.Pinnacle.Machines uses this
+        # for its machine list.  Those headers are NOT identical to each
+        # other, so the equality test below never split them; and because
+        # "#" opens a comment in YAML the headers were then silently dropped,
+        # collapsing every object in the file into a single mapping in which
+        # duplicate keys overwrote one another (last one wins).  A two-machine
+        # Machines file therefore parsed as one machine wearing the second
+        # machine's name and a mixture of both machines' data.
+        #
+        # Splitting on the "#N ={" pattern restores one object per segment.
+        # Only files that *begin* with such a header take this path, so
+        # nested "#N ={" entries inside "...List ={" containers (which the
+        # sequence handling in convert_to_yaml already deals with) are
+        # completely unaffected.
         first_line = data[0]
-        indices = [i for i, line in enumerate(data) if line == first_line]
+        if _NUMBERED_OBJECT_HEADER.match(first_line):
+            indices = [
+                i for i, line in enumerate(data)
+                if _NUMBERED_OBJECT_HEADER.match(line)
+            ]
+            logger.debug(
+                "'%s' uses numbered object headers; split into %d object(s).",
+                filename, len(indices),
+            )
+        else:
+            indices = [i for i, line in enumerate(data) if line == first_line]
 
         for i, _ in enumerate(indices):
             next_index = -1
@@ -182,7 +259,7 @@ def pinn_to_dict(filename):
 
             try:
                 yaml_text = convert_to_yaml(split_data)
-                d = yaml.safe_load(yaml_text)
+                d = _safe_load_reporting_duplicates(yaml_text, filename, i)
             except Exception as exc:
                 logger.warning(
                     "YAML parse failed for '%s' (segment %d): %s — "
@@ -194,7 +271,7 @@ def pinn_to_dict(filename):
                 try:
                     sanitised = [_sanitise_line(l) for l in split_data]
                     yaml_text = convert_to_yaml(sanitised)
-                    d = yaml.safe_load(yaml_text)
+                    d = _safe_load_reporting_duplicates(yaml_text, filename, i)
                 except Exception as exc2:
                     logger.warning(
                         "Sanitised YAML parse also failed for '%s' (segment %d): %s — "

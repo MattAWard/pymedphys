@@ -7,7 +7,7 @@ alabaster==0.7.16
     # via sphinx
 appnope==0.1.4 ; sys_platform == 'darwin'
     # via ipykernel
-asttokens==3.0.1
+asttokens==3.0.2
     # via stack-data
 attrs==26.1.0
     # via
@@ -18,15 +18,15 @@ babel==2.18.0
     # via
     #   pydata-sphinx-theme
     #   sphinx
-beautifulsoup4==4.14.3
+beautifulsoup4==4.15.0
     # via pydata-sphinx-theme
-certifi==2026.4.22
+certifi==2026.7.22
     # via requests
-cffi==2.0.0 ; implementation_name == 'pypy'
+cffi==2.1.0 ; implementation_name == 'pypy'
     # via pyzmq
-charset-normalizer==3.4.7
+charset-normalizer==3.4.9
     # via requests
-click==8.3.2
+click==8.4.2
     # via
     #   jupyter-book
     #   jupyter-cache
@@ -45,9 +45,9 @@ contourpy==1.3.3 ; python_full_version >= '3.11'
     # via matplotlib
 cycler==0.12.1
     # via matplotlib
-debugpy==1.8.20
+debugpy==1.8.21
     # via ipykernel
-decorator==5.2.1
+decorator==5.3.1
     # via ipython
 docutils==0.21.2
     # via
@@ -64,11 +64,11 @@ executing==2.2.1
     # via stack-data
 fastjsonschema==2.21.2
     # via nbformat
-fonttools==4.62.1
+fonttools==4.63.0
     # via matplotlib
-greenlet==3.4.0 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
+greenlet==3.5.3 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
     # via sqlalchemy
-idna==3.15
+idna==3.18
     # via requests
 imagesize==2.0.0
     # via sphinx
@@ -76,26 +76,21 @@ importlib-metadata==9.0.0
     # via
     #   jupyter-cache
     #   myst-nb
-ipykernel==7.2.0
+ipykernel==7.3.0
     # via myst-nb
 ipython==8.39.0 ; python_full_version < '3.11'
     # via
     #   ipykernel
     #   myst-nb
     #   pymedphys
-ipython==9.10.1 ; python_full_version == '3.11.*'
-    # via
-    #   ipykernel
-    #   myst-nb
-    #   pymedphys
-ipython==9.12.0 ; python_full_version >= '3.12'
+ipython==9.15.0 ; python_full_version >= '3.11'
     # via
     #   ipykernel
     #   myst-nb
     #   pymedphys
 ipython-pygments-lexers==1.1.1 ; python_full_version >= '3.11'
     # via ipython
-jedi==0.19.2
+jedi==0.20.0
     # via ipython
 jinja2==3.1.6
     # via
@@ -112,7 +107,7 @@ jupyter-book==1.0.4.post1
     # via pymedphys
 jupyter-cache==1.0.1
     # via myst-nb
-jupyter-client==8.8.0
+jupyter-client==8.9.1
     # via
     #   ipykernel
     #   nbclient
@@ -128,7 +123,7 @@ latexcodec==3.0.1
     # via pybtex
 linkify-it-py==2.1.0
     # via jupyter-book
-llvmlite==0.47.0
+llvmlite==0.48.0
     # via numba
 markdown-it-py==3.0.0
     # via
@@ -136,13 +131,15 @@ markdown-it-py==3.0.0
     #   myst-parser
 markupsafe==3.0.3
     # via jinja2
-matplotlib==3.10.8
+matplotlib==3.10.9 ; python_full_version < '3.11'
     # via pymedphys
-matplotlib-inline==0.2.1
+matplotlib==3.11.1 ; python_full_version >= '3.11'
+    # via pymedphys
+matplotlib-inline==0.2.2
     # via
     #   ipykernel
     #   ipython
-mdit-py-plugins==0.5.0
+mdit-py-plugins==0.6.1
     # via myst-parser
 mdurl==0.1.2
     # via markdown-it-py
@@ -152,7 +149,7 @@ myst-parser==3.0.1
     # via
     #   jupyter-book
     #   myst-nb
-nbclient==0.10.4
+nbclient==0.11.0
     # via
     #   jupyter-cache
     #   myst-nb
@@ -161,13 +158,13 @@ nbformat==5.10.4
     #   jupyter-cache
     #   myst-nb
     #   nbclient
-nest-asyncio==1.6.0
+nest-asyncio2==1.7.2
     # via ipykernel
 networkx==3.4.2 ; python_full_version < '3.11'
     # via pymedphys
 networkx==3.6.1 ; python_full_version >= '3.11'
     # via pymedphys
-numba==0.65.0
+numba==0.66.0
     # via pymedphys
 numpy==2.2.6 ; python_full_version < '3.11'
     # via
@@ -176,14 +173,14 @@ numpy==2.2.6 ; python_full_version < '3.11'
     #   numba
     #   pymedphys
     #   scipy
-numpy==2.4.4 ; python_full_version >= '3.11'
+numpy==2.4.6 ; python_full_version >= '3.11'
     # via
     #   contourpy
     #   matplotlib
     #   numba
     #   pymedphys
     #   scipy
-packaging==26.1
+packaging==26.2
     # via
     #   ipykernel
     #   matplotlib
@@ -191,20 +188,22 @@ packaging==26.1
     #   sphinx
     #   sphinx-jupyterbook-latex
     #   wheel
-parso==0.8.6
+parso==0.8.7
     # via jedi
 pexpect==4.9.0 ; sys_platform != 'emscripten' and sys_platform != 'win32'
     # via ipython
-pillow==12.2.0
+pillow==12.3.0
     # via
     #   matplotlib
     #   pymedphys
-platformdirs==4.9.6
+platformdirs==4.11.0
     # via jupyter-core
 prompt-toolkit==3.0.52
     # via ipython
 psutil==7.2.2
-    # via ipykernel
+    # via
+    #   ipykernel
+    #   ipython
 ptyprocess==0.7.0 ; sys_platform != 'emscripten' and sys_platform != 'win32'
     # via pexpect
 pure-eval==0.2.3
@@ -219,7 +218,7 @@ pycparser==3.0 ; implementation_name == 'pypy'
     # via cffi
 pydata-sphinx-theme==0.15.4 ; python_full_version < '3.11'
     # via sphinx-book-theme
-pydata-sphinx-theme==0.16.1 ; python_full_version >= '3.11'
+pydata-sphinx-theme==0.17.1 ; python_full_version >= '3.11'
     # via sphinx-book-theme
 pydicom==3.0.2
     # via pymedphys
@@ -252,23 +251,29 @@ referencing==0.37.0
     # via
     #   jsonschema
     #   jsonschema-specifications
-requests==2.33.1
+requests==2.34.2
     # via sphinx
-rpds-py==0.30.0
+rpds-py==0.30.0 ; python_full_version < '3.11'
+    # via
+    #   jsonschema
+    #   referencing
+rpds-py==2026.6.3 ; python_full_version >= '3.11'
     # via
     #   jsonschema
     #   referencing
 scipy==1.15.3 ; python_full_version < '3.11'
     # via pymedphys
-scipy==1.17.1 ; python_full_version >= '3.11'
+scipy==1.17.1 ; python_full_version == '3.11.*'
     # via pymedphys
-setuptools==82.0.1
+scipy==1.18.0 ; python_full_version >= '3.12'
+    # via pymedphys
+setuptools==83.0.0
     # via sphinx-togglebutton
 six==1.17.0
     # via python-dateutil
-snowballstemmer==3.0.1
+snowballstemmer==3.1.1
     # via sphinx
-soupsieve==2.8.3
+soupsieve==2.9.1
     # via beautifulsoup4
 sphinx==7.4.7
     # via
@@ -287,13 +292,13 @@ sphinx==7.4.7
     #   sphinx-thebe
     #   sphinx-togglebutton
     #   sphinxcontrib-bibtex
-sphinx-argparse==0.5.2
+sphinx-argparse==0.6.0
     # via pymedphys
 sphinx-book-theme==1.1.4 ; python_full_version < '3.11'
     # via
     #   jupyter-book
     #   pymedphys
-sphinx-book-theme==1.2.0 ; python_full_version >= '3.11'
+sphinx-book-theme==1.3.0 ; python_full_version >= '3.11'
     # via
     #   jupyter-book
     #   pymedphys
@@ -319,7 +324,7 @@ sphinx-togglebutton==0.4.5
     # via jupyter-book
 sphinxcontrib-applehelp==2.0.0
     # via sphinx
-sphinxcontrib-bibtex==2.6.5
+sphinxcontrib-bibtex==2.7.0
     # via jupyter-book
 sphinxcontrib-devhelp==2.0.0
     # via sphinx
@@ -331,7 +336,7 @@ sphinxcontrib-qthelp==2.0.0
     # via sphinx
 sphinxcontrib-serializinghtml==2.0.0
     # via sphinx
-sqlalchemy==2.0.49
+sqlalchemy==2.0.51
     # via jupyter-cache
 stack-data==0.6.3
     # via ipython
@@ -341,16 +346,16 @@ toml==0.10.2
     # via pymedphys
 tomli==2.4.1 ; python_full_version < '3.11'
     # via sphinx
-tomlkit==0.15.0
+tomlkit==0.15.1
     # via pymedphys
-tornado==6.5.5
+tornado==6.5.7
     # via
     #   ipykernel
     #   jupyter-client
     #   pymedphys
-tqdm==4.67.3
+tqdm==4.69.0
     # via pymedphys
-traitlets==5.14.3
+traitlets==5.15.1
     # via
     #   ipykernel
     #   ipython
@@ -359,11 +364,12 @@ traitlets==5.14.3
     #   matplotlib-inline
     #   nbclient
     #   nbformat
-typing-extensions==4.15.0
+typing-extensions==4.16.0
     # via
     #   beautifulsoup4
     #   exceptiongroup
     #   ipython
+    #   jupyter-client
     #   myst-nb
     #   pydata-sphinx-theme
     #   pymedphys
@@ -375,11 +381,11 @@ urllib3==2.7.0
     # via
     #   pymedphys
     #   requests
-wcwidth==0.6.0
+wcwidth==0.8.2
     # via prompt-toolkit
-wheel==0.46.3
+wheel==0.47.0
     # via
     #   pymedphys
     #   sphinx-togglebutton
-zipp==3.23.1
+zipp==4.1.0
     # via importlib-metadata

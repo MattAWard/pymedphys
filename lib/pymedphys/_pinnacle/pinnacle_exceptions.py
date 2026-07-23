@@ -51,3 +51,31 @@ class MissingTrialBeamsError(Exception):
 class MissingBeamDoseError(Exception):
     # Raised when all plan beams are missing dose
     pass
+
+
+class InvalidDoseNormalizationError(Exception):
+    # Raised when a beam has a non-zero prescription dose but the
+    # interpolated dose at its prescription point is zero, so its
+    # monitor units cannot be derived. Continuing would silently
+    # under-report the PLAN dose summation, so the trial's
+    # dose export is failed instead.
+    pass
+
+
+class IsocenterNotFoundError(Exception):
+    # Raised when no isocenter can be resolved for a beam — either the
+    # trial names an isocenter point that does not exist in plan.Points,
+    # or no isocenter-like point can be identified at all.  Assuming an
+    # arbitrary point is dangerous, so the trial's RTPLAN export is
+    # failed instead.
+    pass
+
+
+class MachineDataNotFoundError(Exception):
+    # Raised when required machine geometry (currently the MLC leaf
+    # boundary layout) cannot be derived from plan.Pinnacle.Machines for
+    # a beam that uses an MLC.  Exporting with an assumed or default
+    # (e.g. Varian-Millennium) boundary table is dangerous — a wrong table
+    # silently shifts every leaf pair — so the trial's RTPLAN export is
+    # failed instead.
+    pass

@@ -341,6 +341,75 @@ def append_pinnacle_metadata_for_plan(
 _EQUIPMENT_SEP = "-"
 
 
+# --- ApprovalStatus derivation ---------------------------------
+#
+# Pinnacle's PlanLockStatus is the closest analogue to the DICOM
+# ApprovalStatus concept: a locked plan has been signed off inside
+# Pinnacle.  These helpers map lock → APPROVED (with the reviewer /
+# timestamp audit fields where parseable) and unlocked → UNAPPROVED.
+
+
+def derive_approval_fields(plan):
+    """Derive DICOM approval attributes from the Pinnacle lock status.
+
+    Parameters
+    ----------
+    plan : PinnaclePlan
+
+    Returns
+    -------
+    dict
+        Keys: ``status`` (``"APPROVED"`` / ``"UNAPPROVED"``),
+        ``reviewer_name``, ``review_date`` (DICOM DA or ``""``),
+        ``review_time`` (DICOM TM or ``""``).
+    """
+    lock_info = parse_lock_status(resolve_lock_status(plan))
+    if lock_info is None:
+        return {
+            "status": "UNAPPROVED",
+            "reviewer_name": "",
+            "review_date": "",
+            "review_time": "",
+        }
+
+    reviewer = lock_info["username"] or lock_info["initials"] or ""
+    review_date = ""
+    review_time = ""
+    if lock_info["timestamp"]:
+        # "YYYY-MM-DD HH:MM:SS" → DA "YYYYMMDD", TM "HHMMSS"
+        try:
+            date_part, time_part = lock_info["timestamp"].split()
+            review_date = date_part.replace("-", "")
+            review_time = time_part.replace(":", "")
+        except ValueError:
+            pass
+
+    return {
+        "status": "APPROVED",
+        "reviewer_name": reviewer,
+        "review_date": review_date,
+        "review_time": review_time,
+    }
+
+
+def apply_approval_status(ds, plan):
+    """Set ApprovalStatus (and audit fields) on *ds* from the plan lock.
+
+    ReviewDate / ReviewTime / ReviewerName are Type 2C — required when
+    ApprovalStatus is APPROVED or REJECTED — so they are written (possibly
+    empty) whenever the status is not UNAPPROVED.
+    """
+    fields = derive_approval_fields(plan)
+    ds.ApprovalStatus = fields["status"]
+    if fields["status"] != "UNAPPROVED":
+        ds.ReviewDate = fields["review_date"]
+        ds.ReviewTime = fields["review_time"]
+        ds.ReviewerName = fields["reviewer_name"]
+    plan.logger.debug(
+        "ApprovalStatus derived from PlanLockStatus: %s", fields["status"]
+    )
+
+
 def _join_with_sep(base, suffix, sep=_EQUIPMENT_SEP):
     """Join *base* and *suffix* with *sep*, handling empty parts cleanly.
 
@@ -378,7 +447,8 @@ def apply_equipment_stamps(
     equipment_cfg : dict
         Should contain any/all of the below:
         ``MANUFACTURER_SUFFIX``, ``MODEL_NAME_SUFFIX``,
-        ``SOFTWARE_VERSION_SUFFIX``, ``INSTITUTION_SUFFIX``.
+        ``SOFTWARE_VERSION_SUFFIX``, ``INSTITUTION_SUFFIX``,
+        ``STATION_NAME``.
         Missing keys are silently treated as empty strings.
     pinnacle_model : str
         Pinnacle ``ToolType`` value (e.g. ``"Pinnacle3"``).
@@ -413,6 +483,13 @@ def apply_equipment_stamps(
     if institution:
         ds.InstitutionName = institution
 
+    # StationName (Type 3): site-configured value, not composed with any
+    # Pinnacle base — Pinnacle archives don't carry a meaningful station
+    # name for the export host.
+    station = (equipment_cfg.get("STATION_NAME") or "").strip()
+    if station:
+        ds.StationName = station
+
 
 # --- Pinn2Dicom UID generation -----------------------------------------------
 #
@@ -429,18 +506,24 @@ def apply_equipment_stamps(
 # of the application (web server or CLI).
 
 # Modality indices — arbitrary but fixed per DICOM object type.
-# FIXME - these are not ideal, if mod. X is .00n, then series_X is .10n. Bertter this way. CT should be first
+#
+# Layout: CT first, then the RT objects in dependency order.  Series UIDs
+# mirror their instance index with a leading 1 (instance n -> series 1n),
+# so the relationship stays readable at a glance.
 UID_MODALITY_INDEX = {
-    "struct": "001",  # RTSTRUCT
-    "plan": "002",  # RTPLAN
-    "dose": "003",  # RTDOSE
-    "series_struct": "004",  # Series UID for RTSTRUCT
-    "series_plan":   "005",  # Series UID for RTPLAN
-    "series_dose":   "006",  # Series UID for RTDOSE
-    "study":         "007",  # StudyInstanceUID (shared across objects)
-    "ct":            "008",  # CT SOP Instance UID (per slice)
-    "series_ct":     "009",  # Series UID for CT
-    "frame":         "010",  # FrameOfReferenceUID
+    # SOP Instance UIDs
+    "ct":     "1",  # CT SOP Instance UID (per slice)
+    "struct": "2",  # RTSTRUCT
+    "plan":   "3",  # RTPLAN
+    "dose":   "4",  # RTDOSE
+    # Study / Frame of Reference (shared across objects)
+    "study":  "5",  # StudyInstanceUID
+    "frame":  "6",  # FrameOfReferenceUID
+    # Series Instance UIDs (instance index + 10)
+    "series_ct":     "11",
+    "series_struct": "12",
+    "series_plan":   "13",
+    "series_dose":   "14",
 }
 
 
@@ -491,6 +574,23 @@ class _UIDGenerator:
                 f"Generated UID exceeds {self._MAX_UID_LENGTH} chars "
                 f"({len(uid)}): {uid}"
             )
+
+        # Guard against non-conformant components (PS3.5 §9.1): digits only,
+        # no empty component, and no leading zero on a multi-digit component.
+        # This catches a malformed UID_ROOT or a future edit to
+        # UID_MODALITY_INDEX before the value ever reaches a DICOM file.
+        for component in uid.split("."):
+            if not component.isdigit():
+                raise ValueError(
+                    f"Generated UID has a non-numeric or empty component "
+                    f"'{component}': {uid}"
+                )
+            if len(component) > 1 and component[0] == "0":
+                raise ValueError(
+                    f"Generated UID component '{component}' has a leading "
+                    f"zero, which is invalid in a DICOM UID: {uid}"
+                )
+
         return uid
 
 

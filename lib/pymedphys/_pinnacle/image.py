@@ -178,8 +178,15 @@ def create_image_files(image, export_path):
     curframe = 0
     z_sign = _SLICE_Z_SIGN.get(currentpatientposition, -1)
     x_sign, y_sign = _IPP_XY_SIGN.get(currentpatientposition, (-1, -1))
-    half_x_mm = float(image_header["x_pixdim"]) * 10 * float(image_header["x_dim"]) / 2
-    half_y_mm = float(image_header["y_pixdim"]) * 10 * float(image_header["y_dim"]) / 2
+    x_pixdim_mm = float(image_header["x_pixdim"]) * 10
+    y_pixdim_mm = float(image_header["y_pixdim"]) * 10
+    half_x_mm = x_pixdim_mm * float(image_header["x_dim"]) / 2
+    half_y_mm = y_pixdim_mm * float(image_header["y_dim"]) / 2
+    # ImagePositionPatient is the CENTRE of the first voxel (PS3.3 C.7.6.2.1),
+    # i.e. half a pixel inside the grid corner. The previous half-extent value
+    # (N/2 * pixdim) introduced a half-voxel origin offset.
+    first_voxel_x_mm = half_x_mm - x_pixdim_mm / 2
+    first_voxel_y_mm = half_y_mm - y_pixdim_mm / 2
 
     for info in image_info:
         sliceloc = z_sign * info["TablePosition"] * 10
@@ -232,6 +239,10 @@ def create_image_files(image, export_path):
         ds.BitsStored = 16
         ds.HighBit = 15
         ds.PixelRepresentation = 1
+        # Archive does not reliably carry rescale values on this path;
+        # -1024 / 1.0 is the near-universal CT convention.
+        # Known limitation: unusual scanners with a different
+        # intercept would be mis-scaled on the reconstruction path.
         ds.RescaleIntercept = -1024
         ds.RescaleSlope = 1.0
         # ds.kvp = ?? This should be peak kilovoltage output of x ray
@@ -262,9 +273,10 @@ def create_image_files(image, export_path):
         # problem, some of these are repeated in image file so not sure
         # what to do with that
         ds.InstanceNumber = slicenum
+        # first-voxel-centre geometry (see above).
         ds.ImagePositionPatient = [
-            x_sign * half_x_mm,
-            y_sign * half_y_mm,
+            x_sign * first_voxel_x_mm,
+            y_sign * first_voxel_y_mm,
             sliceloc,
         ]
         if currentpatientposition in IMAGE_ORIENTATION_MAP:
@@ -285,9 +297,13 @@ def create_image_files(image, export_path):
         ds.PhotometricInterpretation = "MONOCHROME2"
         ds.Rows = int(image_header["y_dim"])
         ds.Columns = int(image_header["x_dim"])
+        # PixelSpacing is [row spacing (adjacent rows, i.e. the
+        # y/vertical step), column spacing (adjacent columns, i.e. the
+        # x/horizontal step)] per PS3.3 C.7.6.3.1; previously written in
+        # [x, y] order, transposing the spacing for anisotropic grids.
         ds.PixelSpacing = [
-            float(image_header["x_pixdim"]) * 10,
-            float(image_header["y_pixdim"]) * 10,
+            y_pixdim_mm,
+            x_pixdim_mm,
         ]
 
         if curframe >= len(allframeslist):
@@ -303,7 +319,7 @@ def create_image_files(image, export_path):
 
         output_file = os.path.join(export_path, image_file_name)
         image.logger.info("Creating image: %s", output_file)
-        ds.save_as(output_file)
+        ds.save_as(output_file, enforce_file_format=True)
         curframe = curframe + 1
 
 
@@ -372,5 +388,4 @@ def convert_image(image, export_path):
         )
 
         imageds.save_as(output_file, enforce_file_format=True)
-        image.logger.info("Exported: %s to %s", file, output_file)
         image.logger.info("Exported: %s to %s", file, output_file)

@@ -248,7 +248,7 @@ class PinnacleExport:
         """
 
         # Export Structures for plan
-        convert_st ruct(plan, export_path, skip_pattern)
+        convert_struct(plan, export_path, skip_pattern)
 
     @staticmethod
     def export_dose(plan, export_path="."):
