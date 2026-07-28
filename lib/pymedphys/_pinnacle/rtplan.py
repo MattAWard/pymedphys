@@ -109,7 +109,11 @@ def _truncate_sh(value, logger=None, tag=""):
             "%s value %r is %d chars, exceeding the DICOM SH limit of %d; "
             "truncated to %r (the full name is retained in the "
             "corresponding LO-VR attribute).",
-            tag or "SH", text, len(text), _DICOM_SH_MAX, truncated,
+            tag or "SH",
+            text,
+            len(text),
+            _DICOM_SH_MAX,
+            truncated,
         )
     return truncated
 
@@ -195,7 +199,8 @@ def _select_machine(machine_info, machinename, machineversion, logger=None):
                 "No machine entries could be located in the parsed "
                 "plan.Pinnacle.Machines structure (top-level keys: %s). The "
                 "file may use an unexpected layout.",
-                sorted(machine_info)[:10] if isinstance(machine_info, dict)
+                sorted(machine_info)[:10]
+                if isinstance(machine_info, dict)
                 else type(machine_info).__name__,
             )
         return None
@@ -203,8 +208,7 @@ def _select_machine(machine_info, machinename, machineversion, logger=None):
     # 1. Exact match on both name and version timestamp.
     for machine in candidates:
         if machine.get("Name") == machinename and (
-            not machineversion
-            or machine.get("VersionTimestamp") == machineversion
+            not machineversion or machine.get("VersionTimestamp") == machineversion
         ):
             return machine
 
@@ -216,7 +220,8 @@ def _select_machine(machine_info, machinename, machineversion, logger=None):
                 logger.debug(
                     "Machine '%s' matched by name only (version '%s' not "
                     "matched exactly; file has '%s').",
-                    machinename, machineversion,
+                    machinename,
+                    machineversion,
                     machine.get("VersionTimestamp"),
                 )
             return machine
@@ -231,7 +236,9 @@ def _select_machine(machine_info, machinename, machineversion, logger=None):
         logger.warning(
             "Machine '%s' (version '%s') not found among the %d machine "
             "entry/entries in plan.Pinnacle.Machines. Available: %s",
-            machinename, machineversion, len(candidates),
+            machinename,
+            machineversion,
+            len(candidates),
             "; ".join(available) or "(none)",
         )
     return None
@@ -831,7 +838,8 @@ def convert_plan_for_trial(
     # RTPlanLabel is VR SH (max 16 chars); RTPlanName is LO (max 64) and
     # keeps the full untruncated Pinnacle plan name.
     ds.RTPlanLabel = _truncate_sh(
-        f"{plan_info['PlanName']}.0", plan.logger, "RTPlanLabel")
+        f"{plan_info['PlanName']}.0", plan.logger, "RTPlanLabel"
+    )
     ds.RTPlanName = plan_info["PlanName"]
     ds.RTPlanDescription = append_pinnacle_metadata_for_plan(
         None,
@@ -1009,9 +1017,7 @@ def convert_plan_for_trial(
 
         # Wedge context is constant across a beam's control points in
         # Pinnacle; read it from the first CP.
-        wedge_info = _parse_wedge_info(
-            cp_manager["ControlPointList"][0], plan.logger
-        )
+        wedge_info = _parse_wedge_info(cp_manager["ControlPointList"][0], plan.logger)
         p_count = cp_data_list[0]["p_count"]
 
         numwedges = wedge_info["count"] if wedge_info else 0
