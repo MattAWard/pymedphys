@@ -416,11 +416,7 @@ def read_roi(ds, plan, skip_pattern):
                     curr_points, patient_position, coord_shift
                 )
 
-                # Round the very first point for numerical stability
-                if len(points) == 3:
-                    points[0] = round(points[0], 5)
-                    points[1] = round(points[1], 5)
-                    points[2] = round(points[2], 5)
+                transformed = [round(v, 5) for v in transformed]
 
                 points = points + transformed
 

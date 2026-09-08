@@ -1378,22 +1378,12 @@ def _build_non_ss_control_points(
         beam_ds.WedgeSequence = _create_wedge_sequence(wedge_info)
 
     # --- Cumulative meterset weights --------
-    # metersetweight is ["0", w1, ..., wN]; the raw Pinnacle values are
-    # used as cumulative weights (unchanged behaviour), but they are now
-    # verified to be monotonic non-decreasing and FCMW follows the data.
-    cumulative_weights = [float(metersetweight[j]) for j in range(total_cps)]
-    for a, b in zip(cumulative_weights, cumulative_weights[1:]):
-        if b < a:
-            plan.logger.warning(
-                "Beam '%s': CumulativeMetersetWeight decreases (%s → %s); "
-                "the Pinnacle control point weights do not appear to be "
-                "cumulative. The values are exported as-is — verify this "
-                "beam against a native Pinnacle export.",
-                beam["Name"],
-                a,
-                b,
-            )
-            break
+    cumulative_weights = []
+    running = 0.0
+    for j in range(total_cps):
+        if j > 0:
+            running += float(metersetweight[j])
+        cumulative_weights.append(running)
 
     final_weight = cumulative_weights[-1] if cumulative_weights else 0.0
     beam_ds.FinalCumulativeMetersetWeight = _format_ds(final_weight)
