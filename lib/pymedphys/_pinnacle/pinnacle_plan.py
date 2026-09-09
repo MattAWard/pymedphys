@@ -114,12 +114,24 @@ class PinnaclePlan:
         self._struct_inst_uid = None  # UID for RTStruct instance
         self._trial_uid_cache = {}  # Cache: trial key → uid dict
 
+        primary_id = self.plan_info.get("PrimaryCTImageSetID")
         for image in pinnacle.images:
-            if image.image["ImageSetID"] == self.plan_info["PrimaryCTImageSetID"]:
+            if image.image["ImageSetID"] == primary_id:
                 self._primary_image = image
 
         if not self._primary_image:
-            self.logger.warning("Primary Image Not Available")
+            available_ids = [img.image["ImageSetID"] for img in pinnacle.images]
+            self.logger.warning(
+                "Plan '%s' (PlanID %s): primary image set not available "
+                "(PrimaryCTImageSetID=%s not found among loaded image "
+                "set(s): %s). This plan will be missing primary-image-"
+                "derived data (e.g. patient position, CT reference) unless "
+                "handled elsewhere.",
+                plan.get("PlanName", "?"),
+                plan.get("PlanID", "?"),
+                primary_id,
+                available_ids,
+            )
 
     @property
     def logger(self):

@@ -197,11 +197,13 @@ docs = [
   "sphinx-argparse",
   "sphinx-book-theme",
   "toml",
-  # SECURITY: tornado >=6.5.7 — gzip-bomb decompression without size limit,
+  # SECURITY: tornado >=6.5.8 — gzip-bomb decompression without size limit,
   # Authorization header forwarded across cross-origin redirects,
-  # CurlAsyncHTTPClient per-request credential leak on handle reuse, and
-  # OOB memory access in the C extension.  Pulled in via ipykernel/jupyter.
-  "tornado>=6.5.7",
+  # CurlAsyncHTTPClient per-request credential leak on handle reuse, OOB
+  # memory access in the C extension, and (6.5.8) unbounded
+  # application/x-www-form-urlencoded field parsing that stalls the event
+  # loop (CVE-2026-82397).  Pulled in via ipykernel/jupyter.
+  "tornado>=6.5.8",
   "tqdm",
   "urllib3>=2.7.0",           # prevents old urllib3 via requests/sphinx
   "wheel>=0.45.2",            # path traversal fix
@@ -358,7 +360,19 @@ constraint-dependencies = [
 
   # via ipykernel / jupyter-client / streamlit — see the tornado note in
   # the [docs] extra above.
-  "tornado>=6.5.7",
+  "tornado>=6.5.8",
+
+  # via streamlit — GitPython <3.1.58/3.1.59/3.1.60/3.1.61 chain of
+  # advisories: config-injection RCE via unsafe re-serialization of
+  # multi-line git-config values (CVE-2026-78676), arbitrary file read via
+  # TagReference.create (CVE-2026-78679) and Repo.blame (CVE-2026-78678),
+  # arbitrary file overwrite via IndexFile.from_tree/reset/merge_tree
+  # (CVE-2026-76219), command execution via split_single_char_options
+  # bypass of the unsafe-options guard (CVE-2026-76220), and config-name
+  # injection via unvalidated option names (CVE-2026-76221), plus further
+  # fixes in 3.1.60/3.1.61. Pinned to the latest release since GitPython
+  # has shipped a security fix in nearly every recent patch release.
+  "gitpython>=3.1.62",
 
   # via matplotlib / imageio / streamlit — see the Pillow note in [user].
   "Pillow>=12.3.0",

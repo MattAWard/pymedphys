@@ -122,17 +122,53 @@ class PinnacleImage:
         """
 
         if not self._image_info:
+            image_set_id = self._image["ImageSetID"]
             path_image_info = os.path.join(
-                self._path, f"ImageSet_{self._image['ImageSetID']}.ImageInfo"
+                self._path, f"ImageSet_{image_set_id}.ImageInfo"
             )
 
-            # Make sure the ImageInfo file really exists
-            if not os.path.exists(path_image_info):
-                self.logger.warning("ImageInfo path doesn't exist: %s", path_image_info)
+            # Distinguish *why* the file couldn't be accessed. os.path.exists()
+            # swallows every OSError (including PermissionError), so a file
+            # that exists but can't be read logs identically to a genuinely
+            # missing file - that ambiguity is exactly what this is avoiding.
+            try:
+                os.stat(path_image_info)
+            except FileNotFoundError:
+                self.logger.warning(
+                    "ImageSet %s: ImageInfo file not found: %s",
+                    image_set_id,
+                    path_image_info,
+                )
+                return None
+            except PermissionError:
+                self.logger.warning(
+                    "ImageSet %s: ImageInfo file exists but is not readable "
+                    "(permission denied): %s",
+                    image_set_id,
+                    path_image_info,
+                )
+                return None
+            except OSError as exc:
+                self.logger.warning(
+                    "ImageSet %s: could not access ImageInfo file (%s): %s",
+                    image_set_id,
+                    exc,
+                    path_image_info,
+                )
                 return None
 
             self.logger.debug("Reading image data from: %s", path_image_info)
-            self._image_info = pinn_to_dict(path_image_info)
+            try:
+                self._image_info = pinn_to_dict(path_image_info)
+            except Exception as exc:  # pylint: disable=broad-except
+                self.logger.warning(
+                    "ImageSet %s: ImageInfo file exists and is readable but "
+                    "could not be parsed (%s): %s",
+                    image_set_id,
+                    exc,
+                    path_image_info,
+                )
+                return None
 
         return self._image_info
 

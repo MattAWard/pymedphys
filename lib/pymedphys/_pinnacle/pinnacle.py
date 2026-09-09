@@ -222,12 +222,25 @@ class PinnacleExport:
         # Read patient info to populate patients images
         if not self._images:
             self._images = []
+            excluded_ids = []
             for image in self.patient_info["ImageSetList"]:
                 pi = PinnacleImage(self, self._path, image)
 
                 # Check that image info exists to ensure the image is really available
                 if pi.image_info:
                     self._images.append(pi)
+                else:
+                    excluded_ids.append(image["ImageSetID"])
+
+            if excluded_ids:
+                self.logger.warning(
+                    "%d image set(s) could not be loaded and will not be "
+                    "available as export or primary-image candidates: "
+                    "ImageSetID(s) %s. See the preceding warning(s) above "
+                    "for the specific reason each one failed.",
+                    len(excluded_ids),
+                    excluded_ids,
+                )
 
         return self._images
 
