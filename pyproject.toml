@@ -383,6 +383,42 @@ constraint-dependencies = [
   #   unsatisfiable until the Jupyter Book 2 migration.  It is a feature/
   #   maintenance bump rather than a security fix, so nothing is exposed by
   #   deferring it.
+  #
+  #   Dependabot PR #25 (docutils 0.22.4 -> 0.23) is the same wall, one step
+  #   further out: myst-parser~=3.0 (pulled in by jupyter-book) requires
+  #   docutils>=0.18,<0.22, so 0.23 is unsatisfiable for the same reason as
+  #   the paragraph above. Re-check both together at the Jupyter Book 2
+  #   migration rather than one at a time.
+
+  # NOTE: sphinx >=8.1.3 (Dependabot PR #20, sphinx 7.4.7 -> 8.1.3) is
+  #   deliberately NOT constrained here. sphinx is not a direct dependency;
+  #   it arrives via jupyter-book, and jupyter-book 1.0.4.post1 requires
+  #   sphinx~=7.0 (i.e. >=7.0,<8.0) — confirmed from the published wheel
+  #   metadata. Sphinx 8 is a major version and forcing it here would make
+  #   the [docs] extra unresolvable, not just risky. Feature/maintenance
+  #   bump, not a security fix. Revisit at the Jupyter Book 2 migration
+  #   noted in [docs], same as the docutils/markdown-it-py notes above.
+
+  # NOTE: pyarrow >=25.0.0 (Dependabot PR #24, pyarrow 24.0.0 -> 25.0.0) is
+  #   deliberately NOT constrained here. pyarrow is not a direct dependency;
+  #   the only consumer in the graph is streamlit, and streamlit 1.60.0
+  #   requires pyarrow<25,>=7.0 — a hard ceiling, confirmed from the
+  #   published wheel metadata. Adding a >=25 floor here would make the
+  #   [user] extra unresolvable. Revisit once streamlit raises its own
+  #   ceiling past pyarrow 25.
+
+  # NOTE: pydantic-core >=2.47.0 (Dependabot PR #23) is deliberately NOT
+  #   constrained here. pydantic-core is not a direct dependency — it is
+  #   pydantic's compiled backend, and pydantic pins it with an *exact*
+  #   version match (pydantic 2.13.4 requires pydantic-core==2.46.4; even
+  #   the latest pydantic 2.13.5 only requires ==2.46.5). No published
+  #   pydantic release currently requires pydantic-core==2.47.0. Tested:
+  #   forcing this floor does not fail cleanly — the resolver instead falls
+  #   back all the way to pydantic 1.10.26 (a different major API with no
+  #   pydantic-core dependency at all), which is a silent correctness trap,
+  #   not a resolution error you'd notice in a routine dependency-bump
+  #   review. Do not add this constraint until a pydantic 2.x release
+  #   actually depends on pydantic-core 2.47.0 or later.
 
   # NOTE: markdown-it-py >=4.0.0 (Dependabot PR #13) is deliberately NOT
   #   constrained here.  It is a feature bump, not a security fix, and it is
