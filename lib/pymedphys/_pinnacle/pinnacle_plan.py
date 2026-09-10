@@ -101,6 +101,7 @@ class PinnaclePlan:
         self._points = None  # Data found in plan.Points
         self._patient_setup = None  # Data found in PatientSetup file
         self._primary_image = None  # Primary image for this plan
+        self._primary_image_resolved = False  # Set True once resolution has run
         self._plan_info_file = None  # Data found in plan.PlanInfo (per-plan)
         self._uid_prefix = UID_PREFIX  # The prefix for UIDs generated
 
@@ -114,24 +115,14 @@ class PinnaclePlan:
         self._struct_inst_uid = None  # UID for RTStruct instance
         self._trial_uid_cache = {}  # Cache: trial key → uid dict
 
-        primary_id = self.plan_info.get("PrimaryCTImageSetID")
-        for image in pinnacle.images:
-            if image.image["ImageSetID"] == primary_id:
-                self._primary_image = image
-
-        if not self._primary_image:
-            available_ids = [img.image["ImageSetID"] for img in pinnacle.images]
-            self.logger.warning(
-                "Plan '%s' (PlanID %s): primary image set not available "
-                "(PrimaryCTImageSetID=%s not found among loaded image "
-                "set(s): %s). This plan will be missing primary-image-"
-                "derived data (e.g. patient position, CT reference) unless "
-                "handled elsewhere.",
-                plan.get("PlanName", "?"),
-                plan.get("PlanID", "?"),
-                primary_id,
-                available_ids,
-            )
+        # Primary-image resolution itself is deferred to the `primary_image`
+        # property below (on first access), not done here. Every
+        # PinnaclePlan in a Patient file is constructed up front by
+        # PinnacleExport.plans, including plans a caller goes on to skip
+        # (e.g. via a plan_allowlist). Resolving eagerly here would warn
+        # about a missing primary image for plans nobody ever asked to
+        # export. Deferring means the warning only fires for plans whose
+        # primary_image is actually read.
 
     @property
     def logger(self):
@@ -170,11 +161,41 @@ class PinnaclePlan:
     def primary_image(self):
         """Gets the primary image for this plan.
 
+        Resolved lazily, on first access, rather than at construction
+        time — see the note in ``__init__``. Memoized after the first
+        call, so the search and (if applicable) the warning only ever
+        run once per plan regardless of how many times this is read.
+
         Returns
         -------
-        primary_image : PinnacleImage
-            PinnacleImage representing the primary image for this plan.
+        primary_image : PinnacleImage or None
+            PinnacleImage representing the primary image for this plan,
+            or None if it could not be resolved.
         """
+        if not self._primary_image_resolved:
+            self._primary_image_resolved = True
+
+            primary_id = self.plan_info.get("PrimaryCTImageSetID")
+            for image in self.pinnacle.images:
+                if image.image["ImageSetID"] == primary_id:
+                    self._primary_image = image
+
+            if not self._primary_image:
+                available_ids = [
+                    img.image["ImageSetID"] for img in self.pinnacle.images
+                ]
+                self.logger.warning(
+                    "Plan '%s' (PlanID %s): primary image set not available "
+                    "(PrimaryCTImageSetID=%s not found among loaded image "
+                    "set(s): %s). This plan will be missing primary-image-"
+                    "derived data (e.g. patient position, CT reference) "
+                    "unless handled elsewhere.",
+                    self.plan_info.get("PlanName", "?"),
+                    self.plan_info.get("PlanID", "?"),
+                    primary_id,
+                    available_ids,
+                )
+
         return self._primary_image
 
     @property
@@ -399,8 +420,8 @@ class PinnaclePlan:
 
             # Fallback: derive from the primary image header
             if not self._patient_setup:
-                if self._primary_image and self._primary_image.image_header:
-                    pos = self._primary_image.image_header.get("patient_position", "")
+                if self.primary_image and self.primary_image.image_header:
+                    pos = self.primary_image.image_header.get("patient_position", "")
                     if pos:
                         self.logger.info(
                             "plan.PatientSetup missing — using image header "
@@ -519,7 +540,7 @@ class PinnaclePlan:
             return shift
 
         # major < 9 — read geometry from the image header
-        if not self._primary_image or not self._primary_image.image_header:
+        if not self.primary_image or not self.primary_image.image_header:
             self.logger.warning(
                 "Cannot compute coordinate shift: no primary image header. "
                 "Assuming zero shift."
@@ -527,7 +548,7 @@ class PinnaclePlan:
             self._coordinate_shift_cache = shift
             return shift
 
-        hdr = self._primary_image.image_header
+        hdr = self.primary_image.image_header
 
         try:
             x_dim = float(hdr["x_dim"])
